@@ -232,7 +232,6 @@ fs.writeFileSync(
 );
 
 // ---------- ICON HANDLING (robust) ----------
-// Sizes for each density
 const iconSizes = {
   "mipmap-mdpi": 48,
   "mipmap-hdpi": 72,
@@ -250,7 +249,6 @@ if (cfg.iconBase64) {
   }
 }
 
-// Try to use ImageMagick to normalize icons
 let magickOk = false;
 try {
   execSync("which convert", { stdio: "pipe" });
@@ -263,7 +261,6 @@ for (const [dir, size] of Object.entries(iconSizes)) {
 
   if (userIconPath && magickOk) {
     try {
-      // Force 8-bit sRGB, strip metadata, resize to exact size
       execSync(
         `convert "${userIconPath}" -background none -resize ${size}x${size} ` +
         `-strip -define png:color-type=6 -depth 8 PNG32:"${dest}"`,
@@ -276,12 +273,10 @@ for (const [dir, size] of Object.entries(iconSizes)) {
   }
 
   if (!done) {
-    // Generate a solid-color PNG at the correct size
     fs.writeFileSync(dest, generateSolidPng(cfg.themeColor, size));
   }
 }
 
-// Adaptive icon
 fs.writeFileSync(
   path.join(resDir, "mipmap-anydpi-v26/ic_launcher.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
@@ -292,7 +287,6 @@ fs.writeFileSync(
 `
 );
 
-// Clean up temp icon
 if (userIconPath && fs.existsSync(userIconPath)) fs.unlinkSync(userIconPath);
 
 // ---------- assets/config.json ----------
@@ -381,8 +375,13 @@ class MainActivity : AppCompatActivity() {
                     this@MainActivity.filePathCallback = filePathCallback
                     val intent = fileChooserParams?.createIntent()
                     return try {
-                        startActivityForResult(intent, fileChooserRequestCode)
-                        true
+                        if (intent != null) {
+                            startActivityForResult(intent, fileChooserRequestCode)
+                            true
+                        } else {
+                            this@MainActivity.filePathCallback = null
+                            false
+                        }
                     } catch (e: Exception) {
                         this@MainActivity.filePathCallback = null
                         false
@@ -414,7 +413,7 @@ class MainActivity : AppCompatActivity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
         if (requestCode == fileChooserRequestCode) {
             filePathCallback?.onReceiveValue(
-                FileChooserParams.parseResult(resultCode, data)
+                WebChromeClient.FileChooserParams.parseResult(resultCode, data)
             )
             filePathCallback = null
         } else {
@@ -456,12 +455,11 @@ function generateSolidPng(hex, size = 192) {
   const ihdrData = Buffer.alloc(13);
   ihdrData.writeUInt32BE(width, 0);
   ihdrData.writeUInt32BE(height, 4);
-  ihdrData[8] = 8;   // bit depth
-  ihdrData[9] = 6;   // color type RGBA
+  ihdrData[8] = 8;
+  ihdrData[9] = 6;
   ihdrData[10] = 0; ihdrData[11] = 0; ihdrData[12] = 0;
   const ihdr = chunk("IHDR", ihdrData);
 
-  // Raw scanlines: each row = filter(0) + RGBA * width
   const rowSize = 1 + width * 4;
   const raw = Buffer.alloc(rowSize * height);
   for (let y = 0; y < height; y++) {
