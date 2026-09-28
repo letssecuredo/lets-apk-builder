@@ -10,7 +10,6 @@ on:
         description: "Webhook callback URL"
         required: true
 
-# Required for creating GitHub Releases
 permissions:
   contents: write
 
@@ -20,13 +19,40 @@ jobs:
     timeout-minutes: 25
 
     steps:
+      - name: Notify: Received
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+          STEP_NAME: "Received job"
+          STEP_INDEX: "1"
+        run: node scripts/notify-step.js
+
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Notify: Checked out code
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+          STEP_NAME: "Checked out repository"
+          STEP_INDEX: "2"
+        run: node scripts/notify-step.js
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+
+      - name: Notify: Node ready
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+          STEP_NAME: "Node.js 20 ready"
+          STEP_INDEX: "3"
+        run: node scripts/notify-step.js
 
       - name: Install worker deps
         run: npm install --no-save node-fetch@2
@@ -37,27 +63,43 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Notify: Java ready
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+          STEP_NAME: "Java 17 ready"
+          STEP_INDEX: "4"
+        run: node scripts/notify-step.js
+
       - name: Setup Android SDK
         run: |
           echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
           echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
           echo "PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools" >> $GITHUB_ENV
-          echo "Android SDK location: $ANDROID_HOME"
-          ls -la "$ANDROID_HOME" || true
           sdkmanager --version || true
 
-      - name: Install Android build tools
-        run: |
-          yes | sdkmanager "platforms;android-34" "build-tools;34.0.0" >/dev/null
-          echo "Installed platforms:"
-          sdkmanager --list_installed | head -n 20
-
-      - name: Notify building
+      - name: Notify: Android SDK ready
         env:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           BUILD_ID: ${{ github.event.inputs.buildId }}
           WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
-        run: node scripts/notify-webhook.js building
+          STEP_NAME: "Android SDK ready"
+          STEP_INDEX: "5"
+        run: node scripts/notify-step.js
+
+      - name: Install Android build tools
+        run: |
+          yes | sdkmanager "platforms;android-34" "build-tools;34.0.0" >/dev/null
+
+      - name: Notify: Build tools ready
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+          STEP_NAME: "Android build tools installed"
+          STEP_INDEX: "6"
+        run: node scripts/notify-step.js
 
       - name: Fetch full config from backend
         env:
@@ -74,17 +116,43 @@ jobs:
             const data = JSON.parse(fs.readFileSync('config-response.json', 'utf8'));
             if (!data.config) throw new Error('No config in response');
             fs.writeFileSync('config.json', JSON.stringify(data.config, null, 2));
-            console.log('config.json written. Keys:', Object.keys(data.config).join(','));
           "
+
+      - name: Notify: Config fetched
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+          STEP_NAME: "Configuration loaded"
+          STEP_INDEX: "7"
+        run: node scripts/notify-step.js
 
       - name: Generate Android project
         run: node scripts/generate-project.js config.json
+
+      - name: Notify: Project generated
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+          STEP_NAME: "Android project generated"
+          STEP_INDEX: "8"
+        run: node scripts/notify-step.js
 
       - name: Build APK
         working-directory: android-project
         run: |
           chmod +x ./gradlew
           ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Notify: APK built
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+          STEP_NAME: "APK compiled with Gradle"
+          STEP_INDEX: "9"
+        run: node scripts/notify-step.js
 
       - name: Sign APK
         env:
@@ -105,14 +173,15 @@ jobs:
             --out app-signed.apk \
             app-aligned.apk
           $ANDROID_HOME/build-tools/$BT/apksigner verify app-signed.apk
-          ls -la app-signed.apk
 
-      - name: Notify signing
+      - name: Notify: Signed
         env:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           BUILD_ID: ${{ github.event.inputs.buildId }}
           WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
-        run: node scripts/notify-webhook.js signing
+          STEP_NAME: "APK signed with keystore"
+          STEP_INDEX: "10"
+        run: node scripts/notify-step.js
 
       - name: Upload to GitHub Releases
         id: upload
@@ -122,7 +191,15 @@ jobs:
         run: |
           APK_URL=$(node scripts/upload-to-github-release.js app-signed.apk "${{ github.event.inputs.buildId }}" | tail -n1)
           echo "apk_url=$APK_URL" >> "$GITHUB_OUTPUT"
-          echo "Uploaded to: $APK_URL"
+
+      - name: Notify: Uploaded
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+          STEP_NAME: "Uploaded to GitHub Releases"
+          STEP_INDEX: "11"
+        run: node scripts/notify-step.js
 
       - name: Notify completed
         if: success()
