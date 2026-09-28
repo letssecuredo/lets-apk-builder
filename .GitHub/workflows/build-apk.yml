@@ -1,0 +1,124 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      buildId:
+        description: "Unique build ID"
+        required: true
+      configJson:
+        description: "JSON config"
+        required: true
+      webhookUrl:
+        description: "Webhook callback URL"
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install worker deps
+        run: npm install --no-save firebase-admin node-fetch@2
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build tools
+        run: |
+          yes | sdkmanager "platforms;android-34" "build-tools;34.0.0" >/dev/null
+
+      - name: Notify building
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+        run: node scripts/notify-webhook.js building
+
+      - name: Parse config
+        run: |
+          echo '${{ github.event.inputs.configJson }}' > config.json
+          echo "--- config.json ---"
+          cat config.json | head -c 500
+
+      - name: Generate Android project
+        run: node scripts/generate-project.js config.json
+
+      - name: Build APK
+        working-directory: android-project
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Sign APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > keystore.jks
+          UNSIGNED=android-project/app/build/outputs/apk/release/app-release-unsigned.apk
+          if [ ! -f "$UNSIGNED" ]; then
+            UNSIGNED=$(find android-project/app/build/outputs/apk/release -name "*.apk" | head -n1)
+          fi
+          BT=$(ls $ANDROID_HOME/build-tools | sort -V | tail -n1)
+          $ANDROID_HOME/build-tools/$BT/zipalign -v -p 4 "$UNSIGNED" app-aligned.apk
+          $ANDROID_HOME/build-tools/$BT/apksigner sign \
+            --ks keystore.jks \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass "pass:$KEYSTORE_PASSWORD" \
+            --key-pass "pass:$KEY_PASSWORD" \
+            --out app-signed.apk \
+            app-aligned.apk
+          $ANDROID_HOME/build-tools/$BT/apksigner verify app-signed.apk
+          ls -la app-signed.apk
+
+      - name: Notify signing
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+        run: node scripts/notify-webhook.js signing
+
+      - name: Upload to Firebase Storage
+        id: upload
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          FIREBASE_STORAGE_BUCKET: ${{ secrets.FIREBASE_STORAGE_BUCKET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+        run: |
+          APK_URL=$(node scripts/upload-to-firebase.js app-signed.apk "$BUILD_ID")
+          echo "apk_url=$APK_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Notify completed
+        if: success()
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+          APK_URL: ${{ steps.upload.outputs.apk_url }}
+        run: node scripts/notify-webhook.js completed
+
+      - name: Notify failed
+        if: failure()
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+        run: node scripts/notify-webhook.js failed "Build failed. Check GitHub Actions logs for details."
