@@ -34,14 +34,24 @@ const PERMISSION_KEYS = [
 function validateConfig(body) {
   assert(body && typeof body === "object", "Missing request body");
 
+  // ─── App mode ───
+  const appMode = String(body.appMode || "hybrid");
+  assert(["offline", "online", "hybrid"].includes(appMode), "appMode must be offline|online|hybrid", "appMode");
+
   const appName = String(body.appName || "").trim();
   assert(appName.length >= 1 && appName.length <= 50, "appName must be 1-50 chars", "appName");
 
-  const websiteUrl = String(body.websiteUrl || "").trim();
-  assert(websiteUrl.length > 0, "websiteUrl is required", "websiteUrl");
-  let parsedUrl;
-  try { parsedUrl = new URL(websiteUrl); } catch { throw new ValidationError("websiteUrl is not a valid URL", "websiteUrl"); }
-  assert(parsedUrl.protocol === "https:", "websiteUrl must use https://", "websiteUrl");
+  // ─── Website URL (only required for online/hybrid) ───
+  let websiteUrl = String(body.websiteUrl || "").trim();
+  if (appMode === "offline") {
+    // No real URL needed — keep a placeholder for Firestore
+    websiteUrl = websiteUrl || "https://example.com";
+  } else {
+    assert(websiteUrl.length > 0, "websiteUrl is required", "websiteUrl");
+    let parsedUrl;
+    try { parsedUrl = new URL(websiteUrl); } catch { throw new ValidationError("websiteUrl is not a valid URL", "websiteUrl"); }
+    assert(parsedUrl.protocol === "https:", "websiteUrl must use https://", "websiteUrl");
+  }
 
   const packageName = String(body.packageName || "").trim();
   assert(PACKAGE_RE.test(packageName), "packageName must match com.example.app", "packageName");
@@ -63,10 +73,11 @@ function validateConfig(body) {
     assert(m[1].length <= 700_000, "Icon must be ≤ 500 KB", "iconBase64");
   }
 
-  // ─── Optional offline ZIP ───
+  // ─── Offline ZIP (mode-dependent) ───
   let offlineZipBase64 = null;
   let offlineZipName = null;
   let offlineZipSize = 0;
+
   if (body.offlineZipBase64) {
     const raw = String(body.offlineZipBase64);
     const dm = raw.match(/^data:[^;]+;base64,(.+)$/);
@@ -80,16 +91,22 @@ function validateConfig(body) {
     offlineZipSize = Math.floor((offlineZipBase64.length * 3) / 4);
   }
 
+  // Offline mode REQUIRES ZIP
+  if (appMode === "offline") {
+    assert(offlineZipBase64, "Offline mode requires an offline ZIP bundle", "offlineZipBase64");
+  }
+
   const orientation = String(body.orientation || "portrait");
   assert(["portrait", "landscape", "auto"].includes(orientation), "orientation must be portrait|landscape|auto", "orientation");
 
   const config = {
+    appMode,
     appName, websiteUrl, packageName, versionName, versionCode,
     themeColor, iconBase64, orientation,
     hasOfflineZip: !!offlineZipBase64,
     offlineZipName,
     offlineZipSize,
-    offlineZipBase64, // will be pulled out & stored separately
+    offlineZipBase64,
   };
 
   for (const key of PERMISSION_KEYS) {
