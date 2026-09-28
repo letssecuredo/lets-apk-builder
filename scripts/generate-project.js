@@ -16,12 +16,11 @@ const assetsDir = path.join(ROOT, "app/src/main/assets");
 // Clean
 fs.rmSync(ROOT, { recursive: true, force: true });
 
-// Dirs
+// Dirs — NOTE: no mipmap-anydpi-v26 (we use PNG mipmaps only)
 for (const d of [
   javaDir,
   path.join(resDir, "values"),
   path.join(resDir, "xml"),
-  path.join(resDir, "mipmap-anydpi-v26"),
   path.join(resDir, "mipmap-hdpi"),
   path.join(resDir, "mipmap-mdpi"),
   path.join(resDir, "mipmap-xhdpi"),
@@ -167,7 +166,7 @@ const manifest =
       android:supportsRtl="true"
       android:usesCleartextTraffic="false"
       android:networkSecurityConfig="@xml/network_security_config"
-      android:theme="@style/Theme.AppCompat.Light.NoActionBar">
+      android:theme="@style/AppTheme">
 
       <activity
           android:name=".MainActivity"
@@ -184,7 +183,7 @@ const manifest =
 `;
 fs.writeFileSync(path.join(ROOT, "app/src/main/AndroidManifest.xml"), manifest);
 
-// ---------- res/values ----------
+// ---------- res/values/strings.xml ----------
 fs.writeFileSync(
   path.join(resDir, "values/strings.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
@@ -194,6 +193,7 @@ fs.writeFileSync(
 `
 );
 
+// ---------- res/values/colors.xml ----------
 fs.writeFileSync(
   path.join(resDir, "values/colors.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
@@ -204,6 +204,7 @@ fs.writeFileSync(
 `
 );
 
+// ---------- res/values/styles.xml ----------
 fs.writeFileSync(
   path.join(resDir, "values/styles.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
@@ -212,6 +213,7 @@ fs.writeFileSync(
     <item name="colorPrimary">@color/theme_color</item>
     <item name="colorPrimaryDark">@color/theme_color_dark</item>
     <item name="colorAccent">@color/theme_color</item>
+    <item name="android:windowBackground">@android:color/white</item>
   </style>
 </resources>
 `
@@ -231,7 +233,7 @@ fs.writeFileSync(
 `
 );
 
-// ---------- ICON HANDLING (robust) ----------
+// ---------- ICON HANDLING ----------
 const iconSizes = {
   "mipmap-mdpi": 48,
   "mipmap-hdpi": 72,
@@ -246,14 +248,23 @@ if (cfg.iconBase64) {
   if (m) {
     userIconPath = path.join(ROOT, ".user-icon.png");
     fs.writeFileSync(userIconPath, Buffer.from(m[1], "base64"));
+    console.log("User icon saved, size:", fs.statSync(userIconPath).size, "bytes");
+  } else {
+    console.log("Icon base64 present but regex didn't match");
   }
+} else {
+  console.log("No iconBase64 in config — using fallback solid color");
 }
 
 let magickOk = false;
 try {
   execSync("which convert", { stdio: "pipe" });
   magickOk = true;
-} catch { magickOk = false; }
+  console.log("ImageMagick available");
+} catch {
+  magickOk = false;
+  console.log("ImageMagick NOT available — will use fallback icons");
+}
 
 for (const [dir, size] of Object.entries(iconSizes)) {
   const dest = path.join(resDir, dir, "ic_launcher.png");
@@ -262,30 +273,33 @@ for (const [dir, size] of Object.entries(iconSizes)) {
   if (userIconPath && magickOk) {
     try {
       execSync(
-        `convert "${userIconPath}" -background none -resize ${size}x${size} ` +
-        `-strip -define png:color-type=6 -depth 8 PNG32:"${dest}"`,
+        `convert "${userIconPath}" ` +
+        `-background none ` +
+        `-resize ${size}x${size} ` +
+        `-gravity center ` +
+        `-extent ${size}x${size} ` +
+        `-strip ` +
+        `-define png:color-type=6 ` +
+        `-depth 8 ` +
+        `PNG32:"${dest}"`,
         { stdio: "pipe" }
       );
       done = true;
+      console.log(`✓ Icon ${dir} (${size}x${size}) generated from user icon`);
     } catch (e) {
-      console.warn(`ImageMagick failed for ${dir}: ${e.message}`);
+      console.warn(`✗ ImageMagick failed for ${dir}: ${e.message}`);
     }
   }
 
   if (!done) {
     fs.writeFileSync(dest, generateSolidPng(cfg.themeColor, size));
+    console.log(`→ Icon ${dir} (${size}x${size}) using fallback solid color`);
   }
 }
 
-fs.writeFileSync(
-  path.join(resDir, "mipmap-anydpi-v26/ic_launcher.xml"),
-`<?xml version="1.0" encoding="utf-8"?>
-<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-  <background android:drawable="@color/theme_color" />
-  <foreground android:drawable="@mipmap/ic_launcher" />
-</adaptive-icon>
-`
-);
+// NOTE: We intentionally do NOT create mipmap-anydpi-v26/ic_launcher.xml
+// because it causes a recursive reference loop on Android 8+ (defaults to robot icon)
+// PNG mipmaps are used directly by Android launcher.
 
 if (userIconPath && fs.existsSync(userIconPath)) fs.unlinkSync(userIconPath);
 
@@ -319,7 +333,6 @@ import android.webkit.*
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import org.json.JSONObject
-import android.webkit.GeolocationPermissions
 
 class MainActivity : AppCompatActivity() {
 
@@ -433,7 +446,7 @@ class MainActivity : AppCompatActivity() {
 `;
 fs.writeFileSync(path.join(javaDir, "MainActivity.kt"), mainActivity);
 
-console.log("Android project generated at", ROOT);
+console.log("✅ Android project generated at", ROOT);
 
 // ---------- helpers ----------
 function escapeXml(s) {
