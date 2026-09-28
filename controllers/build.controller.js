@@ -1,5 +1,7 @@
 const { v4: uuidv4 } = require("uuid");
-const { newBuildRecord, saveBuild, getBuild, listBuilds } = require("../services/buildService");
+const {
+  newBuildRecord, saveBuild, getBuild, listBuilds, saveZipChunks, getZipChunks,
+} = require("../services/buildService");
 const { triggerBuildWorkflow } = require("../services/githubService");
 const { record } = require("../services/auditService");
 const logger = require("../utils/logger");
@@ -8,14 +10,32 @@ async function createBuild(req, res, next) {
   try {
     const config = req.validatedConfig;
     const buildId = uuidv4();
-    const record_ = newBuildRecord({ id: buildId, config, userId: req.user?.uid });
 
+    // Pull ZIP base64 out of config — never store it in the main doc
+    const offlineZipBase64 = config.offlineZipBase64 || null;
+    const offlineZipName = config.offlineZipName || null;
+    const offlineZipSize = config.offlineZipSize || 0;
+    delete config.offlineZipBase64;
+
+    const record_ = newBuildRecord({ id: buildId, config, userId: req.user?.uid });
     await saveBuild(record_);
+
+    // Save ZIP in chunks if present
+    if (offlineZipBase64) {
+      try {
+        await saveZipChunks(buildId, offlineZipBase64, offlineZipName, offlineZipSize);
+      } catch (zipErr) {
+        logger.error("ZIP chunk save failed", zipErr.message);
+      }
+    }
 
     try {
       await triggerBuildWorkflow(buildId, config);
     } catch (triggerErr) {
-      await saveBuild({ id: buildId, status: "failed", error: triggerErr.message, updatedAt: new Date().toISOString() });
+      await saveBuild({
+        id: buildId, status: "failed", error: triggerErr.message,
+        updatedAt: new Date().toISOString(),
+      });
       throw triggerErr;
     }
 
@@ -62,11 +82,6 @@ async function downloadBuild(req, res, next) {
   } catch (err) { next(err); }
 }
 
-/**
- * Internal endpoint — worker only.
- * Protected by X-Internal-Secret header matching WEBHOOK_SECRET env.
- * Returns the FULL config including iconBase64.
- */
 async function getInternalConfig(req, res, next) {
   try {
     const secret = req.headers["x-internal-secret"];
@@ -86,4 +101,21 @@ async function getInternalConfig(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { createBuild, getBuildById, listBuildsHandler, downloadBuild, getInternalConfig };
+async function getInternalZip(req, res, next) {
+  try {
+    const secret = req.headers["x-internal-secret"];
+    if (!secret || secret !== process.env.WEBHOOK_SECRET) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const zip = await getZipChunks(req.params.buildId);
+    if (!zip) return res.status(404).json({ error: "No offline ZIP" });
+
+    res.json(zip);
+  } catch (err) { next(err); }
+}
+
+module.exports = {
+  createBuild, getBuildById, listBuildsHandler, downloadBuild,
+  getInternalConfig, getInternalZip,
+};
