@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 /* Generates a complete Android WebView project from config.json
- * Supports 40+ permissions + optional offline ZIP bundling.
+ * Supports 40+ Android permissions + 3 app modes:
+ *   - offline  → always use bundled assets/index.html
+ *   - online   → always use live URL
+ *   - hybrid   → live URL when online, bundled assets when offline
  */
 const fs = require("fs");
 const path = require("path");
@@ -31,7 +34,7 @@ for (const d of [
   assetsDir,
 ]) fs.mkdirSync(d, { recursive: true });
 
-// ─── Offline ZIP extraction (before MainActivity is written) ───
+// ─── Offline ZIP extraction ───
 const offlineZipB64Path = path.join(process.cwd(), "offline.zip.b64");
 let hasOffline = false;
 if (fs.existsSync(offlineZipB64Path)) {
@@ -138,7 +141,7 @@ fs.writeFileSync(path.join(ROOT, "app/proguard-rules.pro"),
 `);
 
 // ═══════════════════════════════════════════════════════════════
-// MANIFEST
+// MANIFEST — build permission & feature list
 // ═══════════════════════════════════════════════════════════════
 const mp = [];
 const mf = [];
@@ -146,22 +149,29 @@ const rp = [];
 
 mp.push(`<uses-permission android:name="android.permission.INTERNET" />`);
 
+// Network
 if (cfg.enableNetworkState) mp.push(`<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />`);
 if (cfg.enableChangeNetwork) mp.push(`<uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />`);
 
+// Camera
 if (cfg.enableCamera) {
   mp.push(`<uses-permission android:name="android.permission.CAMERA" />`);
   mf.push(`<uses-feature android:name="android.hardware.camera" android:required="false" />`);
   mf.push(`<uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />`);
   rp.push("android.permission.CAMERA");
 }
+
+// Microphone
 if (cfg.enableMicrophone) {
   mp.push(`<uses-permission android:name="android.permission.RECORD_AUDIO" />`);
   mf.push(`<uses-feature android:name="android.hardware.microphone" android:required="false" />`);
   rp.push("android.permission.RECORD_AUDIO");
 }
+
+// Audio settings
 if (cfg.enableAudioSettings) mp.push(`<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />`);
 
+// Location
 if (cfg.enableGeolocation) {
   mp.push(`<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />`);
   rp.push("android.permission.ACCESS_FINE_LOCATION");
@@ -178,6 +188,7 @@ if (cfg.enableGeolocation || cfg.enableCoarseLocation || cfg.enableBackgroundLoc
   mf.push(`<uses-feature android:name="android.hardware.location.gps" android:required="false" />`);
 }
 
+// Storage
 if (cfg.enableReadMediaImages) {
   mp.push(`<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />`);
   rp.push("android.permission.READ_MEDIA_IMAGES");
@@ -196,6 +207,7 @@ if (cfg.enableStorage || cfg.enableFileUpload) {
   rp.push("android.permission.READ_EXTERNAL_STORAGE");
 }
 
+// Bluetooth
 if (cfg.enableBluetooth) {
   mp.push(`<uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />`);
   mp.push(`<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />`);
@@ -209,30 +221,44 @@ if (cfg.enableBluetoothLegacy) {
   mp.push(`<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />`);
 }
 
+// NFC
 if (cfg.enableNfc) {
   mp.push(`<uses-permission android:name="android.permission.NFC" />`);
   mf.push(`<uses-feature android:name="android.hardware.nfc" android:required="false" />`);
 }
+
+// Nearby WiFi
 if (cfg.enableNearbyWifi) {
   mp.push(`<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" />`);
   rp.push("android.permission.NEARBY_WIFI_DEVICES");
 }
+
+// WiFi
 if (cfg.enableWifi) mp.push(`<uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />`);
 if (cfg.enableChangeWifi) mp.push(`<uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />`);
 
+// Vibration
 if (cfg.enableVibration) mp.push(`<uses-permission android:name="android.permission.VIBRATE" />`);
+
+// Wake lock
 if (cfg.enableWakeLock) mp.push(`<uses-permission android:name="android.permission.WAKE_LOCK" />`);
+
+// Flashlight
 if (cfg.enableFlashlight) mf.push(`<uses-feature android:name="android.hardware.camera.flash" android:required="false" />`);
 
+// Body sensors
 if (cfg.enableBodySensors) {
   mp.push(`<uses-permission android:name="android.permission.BODY_SENSORS" />`);
   rp.push("android.permission.BODY_SENSORS");
 }
+
+// Activity recognition
 if (cfg.enableActivityRecognition) {
   mp.push(`<uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />`);
   rp.push("android.permission.ACTIVITY_RECOGNITION");
 }
 
+// Phone
 if (cfg.enableReadPhoneState) {
   mp.push(`<uses-permission android:name="android.permission.READ_PHONE_STATE" />`);
   rp.push("android.permission.READ_PHONE_STATE");
@@ -242,6 +268,7 @@ if (cfg.enableCallPhone) {
   rp.push("android.permission.CALL_PHONE");
 }
 
+// Contacts
 if (cfg.enableReadContacts) {
   mp.push(`<uses-permission android:name="android.permission.READ_CONTACTS" />`);
   rp.push("android.permission.READ_CONTACTS");
@@ -250,11 +277,14 @@ if (cfg.enableWriteContacts) {
   mp.push(`<uses-permission android:name="android.permission.WRITE_CONTACTS" />`);
   rp.push("android.permission.WRITE_CONTACTS");
 }
+
+// Accounts
 if (cfg.enableGetAccounts) {
   mp.push(`<uses-permission android:name="android.permission.GET_ACCOUNTS" />`);
   rp.push("android.permission.GET_ACCOUNTS");
 }
 
+// SMS
 if (cfg.enableSendSms) {
   mp.push(`<uses-permission android:name="android.permission.SEND_SMS" />`);
   rp.push("android.permission.SEND_SMS");
@@ -268,6 +298,7 @@ if (cfg.enableReadSms) {
   rp.push("android.permission.READ_SMS");
 }
 
+// Calendar
 if (cfg.enableReadCalendar) {
   mp.push(`<uses-permission android:name="android.permission.READ_CALENDAR" />`);
   rp.push("android.permission.READ_CALENDAR");
@@ -277,16 +308,28 @@ if (cfg.enableWriteCalendar) {
   rp.push("android.permission.WRITE_CALENDAR");
 }
 
+// Notifications
 if (cfg.enableNotifications) {
   mp.push(`<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />`);
   rp.push("android.permission.POST_NOTIFICATIONS");
 }
+
+// Foreground service
 if (cfg.enableForegroundService) mp.push(`<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />`);
+
+// Boot
 if (cfg.enableBootCompleted) mp.push(`<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />`);
+
+// Shortcut
 if (cfg.enableInstallShortcut) mp.push(`<uses-permission android:name="android.permission.INSTALL_SHORTCUT" />`);
+
+// System alert window
 if (cfg.enableSystemAlertWindow) mp.push(`<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />`);
+
+// Install packages
 if (cfg.enableInstallPackages) mp.push(`<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />`);
 
+// Biometric
 if (cfg.enableBiometric) {
   mp.push(`<uses-permission android:name="android.permission.USE_BIOMETRIC" />`);
   rp.push("android.permission.USE_BIOMETRIC");
@@ -339,7 +382,7 @@ const manifest =
 `;
 fs.writeFileSync(path.join(ROOT, "app/src/main/AndroidManifest.xml"), manifest);
 
-// ─── res/values ───
+// ─── res/values/strings.xml ───
 fs.writeFileSync(path.join(resDir, "values/strings.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <resources>
@@ -347,6 +390,7 @@ fs.writeFileSync(path.join(resDir, "values/strings.xml"),
 </resources>
 `);
 
+// ─── res/values/colors.xml ───
 fs.writeFileSync(path.join(resDir, "values/colors.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <resources>
@@ -355,6 +399,7 @@ fs.writeFileSync(path.join(resDir, "values/colors.xml"),
 </resources>
 `);
 
+// ─── res/values/styles.xml ───
 fs.writeFileSync(path.join(resDir, "values/styles.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <resources>
@@ -367,6 +412,7 @@ fs.writeFileSync(path.join(resDir, "values/styles.xml"),
 </resources>
 `);
 
+// ─── network security config ───
 fs.writeFileSync(path.join(resDir, "xml/network_security_config.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
@@ -449,6 +495,7 @@ if (userIconPath && fs.existsSync(userIconPath)) fs.unlinkSync(userIconPath);
 // ─── assets/config.json ───
 fs.writeFileSync(path.join(assetsDir, "config.json"),
   JSON.stringify({
+    appMode: cfg.appMode || "hybrid",
     websiteUrl: cfg.websiteUrl,
     themeColor: cfg.themeColor,
     enableJs: cfg.enableJs,
@@ -462,10 +509,13 @@ fs.writeFileSync(path.join(assetsDir, "config.json"),
 );
 
 // ═══════════════════════════════════════════════════════════════
-// MainActivity.kt (with Hybrid online/offline logic)
+// MainActivity.kt (3-mode routing)
 // ═══════════════════════════════════════════════════════════════
 const permsArrayKt = rp.length > 0 ? rp.map(p => `"${p}"`).join(", ") : "";
 const hasOfflineStr = hasOffline ? "true" : "false";
+
+const appMode = cfg.appMode || "hybrid";
+const appModeStr = JSON.stringify(appMode); // "offline" | "online" | "hybrid"
 
 const mainActivity =
 `package ${cfg.packageName}
@@ -495,7 +545,9 @@ class MainActivity : AppCompatActivity() {
 
     private val startupPermissions = arrayOf(${permsArrayKt})
 
+    // Build-time constants
     private val HAS_OFFLINE = ${hasOfflineStr}
+    private val APP_MODE = ${appModeStr}
     private val LIVE_URL = "${cfg.websiteUrl}"
     private val OFFLINE_URL = "file:///android_asset/index.html"
 
@@ -536,7 +588,9 @@ class MainActivity : AppCompatActivity() {
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val url = request?.url?.toString() ?: return false
-                return if (url.startsWith("http")) { view?.loadUrl(url); true } else false
+                return if (url.startsWith("http") || url.startsWith("file:")) {
+                    view?.loadUrl(url); true
+                } else false
             }
         }
 
@@ -609,11 +663,26 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadBestUrl() {
-        val online = isOnline()
-        val url = when {
-            online -> LIVE_URL
-            HAS_OFFLINE -> OFFLINE_URL
-            else -> null
+        val url: String? = when (APP_MODE) {
+            "offline" -> {
+                // Always use bundled content
+                if (HAS_OFFLINE) OFFLINE_URL else null
+            }
+            "online" -> {
+                // Always use live URL
+                LIVE_URL
+            }
+            "hybrid" -> {
+                // Online → live; Offline → bundled
+                if (isOnline()) LIVE_URL
+                else if (HAS_OFFLINE) OFFLINE_URL
+                else null
+            }
+            else -> {
+                if (isOnline()) LIVE_URL
+                else if (HAS_OFFLINE) OFFLINE_URL
+                else null
+            }
         }
 
         if (url != null) {
@@ -643,8 +712,8 @@ class MainActivity : AppCompatActivity() {
               }
             </style></head>
             <body>
-              <h1>📡 No internet connection</h1>
-              <p>Please connect to WiFi or mobile data and try again.</p>
+              <h1>📡 Content unavailable</h1>
+              <p>Please check your connection and try again.</p>
               <button onclick="location.reload()">Retry</button>
             </body></html>
         """.trimIndent()
@@ -691,6 +760,7 @@ class MainActivity : AppCompatActivity() {
 fs.writeFileSync(path.join(javaDir, "MainActivity.kt"), mainActivity);
 
 console.log("✅ Android project generated at", ROOT);
+console.log("App mode:", appMode, "| hasOffline:", hasOffline);
 
 // ═══════════════════════════════════════════════════════════════
 // HELPERS
