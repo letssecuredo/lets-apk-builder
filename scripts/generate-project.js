@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-/* Generates a complete Android WebView project from config.json */
+/* Generates a complete Android WebView project from config.json
+ * Supports 40+ Android permissions across 12 categories.
+ */
 const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
@@ -16,7 +18,7 @@ const assetsDir = path.join(ROOT, "app/src/main/assets");
 // Clean
 fs.rmSync(ROOT, { recursive: true, force: true });
 
-// Dirs — NOTE: no mipmap-anydpi-v26 (we use PNG mipmaps only)
+// Dirs (no adaptive icon XML — PNG mipmaps only to avoid recursive loop)
 for (const d of [
   javaDir,
   path.join(resDir, "values"),
@@ -29,57 +31,43 @@ for (const d of [
   assetsDir,
 ]) fs.mkdirSync(d, { recursive: true });
 
-// ---------- Root build.gradle ----------
-fs.writeFileSync(
-  path.join(ROOT, "build.gradle"),
+// ─────────────── Root build.gradle ───────────────
+fs.writeFileSync(path.join(ROOT, "build.gradle"),
 `plugins {
   id 'com.android.application' version '8.5.2' apply false
   id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
 }
-`
-);
+`);
 
-// ---------- settings.gradle ----------
-fs.writeFileSync(
-  path.join(ROOT, "settings.gradle"),
+// ─────────────── settings.gradle ───────────────
+fs.writeFileSync(path.join(ROOT, "settings.gradle"),
 `pluginManagement {
-  repositories {
-    google()
-    mavenCentral()
-    gradlePluginPortal()
-  }
+  repositories { google(); mavenCentral(); gradlePluginPortal() }
 }
 dependencyResolutionManagement {
   repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
-  repositories {
-    google()
-    mavenCentral()
-  }
+  repositories { google(); mavenCentral() }
 }
 rootProject.name = "LetsApkBuilder"
 include ':app'
-`
-);
+`);
 
-// ---------- gradle.properties ----------
-fs.writeFileSync(
-  path.join(ROOT, "gradle.properties"),
+// ─────────────── gradle.properties ───────────────
+fs.writeFileSync(path.join(ROOT, "gradle.properties"),
 `org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
 android.useAndroidX=true
 android.nonTransitiveRClass=true
 kotlin.code.style=official
-`
-);
+`);
 
-// ---------- local.properties ----------
+// ─────────────── local.properties ───────────────
 const sdkDir = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT || "/usr/local/lib/android/sdk";
 fs.writeFileSync(path.join(ROOT, "local.properties"), `sdk.dir=${sdkDir}\n`);
 
-// ---------- app/build.gradle ----------
+// ─────────────── app/build.gradle ───────────────
 const minSdk = 21;
 const targetSdk = 34;
-fs.writeFileSync(
-  path.join(ROOT, "app/build.gradle"),
+fs.writeFileSync(path.join(ROOT, "app/build.gradle"),
 `plugins {
   id 'com.android.application'
   id 'org.jetbrains.kotlin.android'
@@ -105,9 +93,7 @@ android {
     }
   }
 
-  aaptOptions {
-    cruncherEnabled = false
-  }
+  aaptOptions { cruncherEnabled = false }
 
   compileOptions {
     sourceCompatibility JavaVersion.VERSION_17
@@ -122,31 +108,229 @@ dependencies {
   implementation 'androidx.webkit:webkit:1.11.0'
   implementation 'com.google.android.material:material:1.12.0'
 }
-`
-);
+`);
 
-fs.writeFileSync(
-  path.join(ROOT, "app/proguard-rules.pro"),
+fs.writeFileSync(path.join(ROOT, "app/proguard-rules.pro"),
 `-keep class ${cfg.packageName}.** { *; }
 -dontwarn android.webkit.**
-`
-);
+`);
 
-// ---------- AndroidManifest.xml ----------
-const permissions = ['<uses-permission android:name="android.permission.INTERNET" />'];
+// ═══════════════════════════════════════════════════════════════
+// MANIFEST — build permission & feature list from config flags
+// ═══════════════════════════════════════════════════════════════
+const mp = []; // <uses-permission>
+const mf = []; // <uses-feature>
+const rp = []; // runtime permissions to request at startup
+
+// Always
+mp.push(`<uses-permission android:name="android.permission.INTERNET" />`);
+
+// ─── Network ───
+if (cfg.enableNetworkState) mp.push(`<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />`);
+if (cfg.enableChangeNetwork) mp.push(`<uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />`);
+
+// ─── Camera ───
 if (cfg.enableCamera) {
-  permissions.push('<uses-permission android:name="android.permission.CAMERA" />');
-  permissions.push('<uses-feature android:name="android.hardware.camera" android:required="false" />');
-}
-if (cfg.enableGeolocation) {
-  permissions.push('<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />');
-  permissions.push('<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />');
-}
-if (cfg.enableFileUpload || cfg.enableStorage) {
-  permissions.push('<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />');
-  permissions.push('<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />');
+  mp.push(`<uses-permission android:name="android.permission.CAMERA" />`);
+  mf.push(`<uses-feature android:name="android.hardware.camera" android:required="false" />`);
+  mf.push(`<uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />`);
+  rp.push("android.permission.CAMERA");
 }
 
+// ─── Microphone ───
+if (cfg.enableMicrophone) {
+  mp.push(`<uses-permission android:name="android.permission.RECORD_AUDIO" />`);
+  mf.push(`<uses-feature android:name="android.hardware.microphone" android:required="false" />`);
+  rp.push("android.permission.RECORD_AUDIO");
+}
+
+// ─── Audio settings ───
+if (cfg.enableAudioSettings) mp.push(`<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />`);
+
+// ─── Location ───
+if (cfg.enableGeolocation) {
+  mp.push(`<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />`);
+  rp.push("android.permission.ACCESS_FINE_LOCATION");
+}
+if (cfg.enableCoarseLocation) {
+  mp.push(`<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />`);
+  rp.push("android.permission.ACCESS_COARSE_LOCATION");
+}
+if (cfg.enableBackgroundLocation) {
+  mp.push(`<uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />`);
+}
+if (cfg.enableGeolocation || cfg.enableCoarseLocation || cfg.enableBackgroundLocation) {
+  mf.push(`<uses-feature android:name="android.hardware.location" android:required="false" />`);
+  mf.push(`<uses-feature android:name="android.hardware.location.gps" android:required="false" />`);
+}
+
+// ─── Storage ───
+if (cfg.enableReadMediaImages) {
+  mp.push(`<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />`);
+  rp.push("android.permission.READ_MEDIA_IMAGES");
+}
+if (cfg.enableReadMediaVideo) {
+  mp.push(`<uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />`);
+  rp.push("android.permission.READ_MEDIA_VIDEO");
+}
+if (cfg.enableReadMediaAudio) {
+  mp.push(`<uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />`);
+  rp.push("android.permission.READ_MEDIA_AUDIO");
+}
+if (cfg.enableStorage || cfg.enableFileUpload) {
+  mp.push(`<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />`);
+  mp.push(`<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />`);
+  rp.push("android.permission.READ_EXTERNAL_STORAGE");
+}
+
+// ─── Bluetooth ───
+if (cfg.enableBluetooth) {
+  mp.push(`<uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />`);
+  mp.push(`<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />`);
+  mp.push(`<uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />`);
+  rp.push("android.permission.BLUETOOTH_SCAN", "android.permission.BLUETOOTH_CONNECT");
+  mf.push(`<uses-feature android:name="android.hardware.bluetooth" android:required="false" />`);
+  mf.push(`<uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />`);
+}
+if (cfg.enableBluetoothLegacy) {
+  mp.push(`<uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />`);
+  mp.push(`<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />`);
+}
+
+// ─── NFC ───
+if (cfg.enableNfc) {
+  mp.push(`<uses-permission android:name="android.permission.NFC" />`);
+  mf.push(`<uses-feature android:name="android.hardware.nfc" android:required="false" />`);
+}
+
+// ─── Nearby WiFi ───
+if (cfg.enableNearbyWifi) {
+  mp.push(`<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" />`);
+  rp.push("android.permission.NEARBY_WIFI_DEVICES");
+}
+
+// ─── WiFi ───
+if (cfg.enableWifi) mp.push(`<uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />`);
+if (cfg.enableChangeWifi) mp.push(`<uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />`);
+
+// ─── Vibration ───
+if (cfg.enableVibration) mp.push(`<uses-permission android:name="android.permission.VIBRATE" />`);
+
+// ─── Wake lock ───
+if (cfg.enableWakeLock) mp.push(`<uses-permission android:name="android.permission.WAKE_LOCK" />`);
+
+// ─── Flashlight ───
+if (cfg.enableFlashlight) {
+  mf.push(`<uses-feature android:name="android.hardware.camera.flash" android:required="false" />`);
+}
+
+// ─── Body sensors ───
+if (cfg.enableBodySensors) {
+  mp.push(`<uses-permission android:name="android.permission.BODY_SENSORS" />`);
+  rp.push("android.permission.BODY_SENSORS");
+}
+
+// ─── Activity recognition ───
+if (cfg.enableActivityRecognition) {
+  mp.push(`<uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />`);
+  rp.push("android.permission.ACTIVITY_RECOGNITION");
+}
+
+// ─── Phone ───
+if (cfg.enableReadPhoneState) {
+  mp.push(`<uses-permission android:name="android.permission.READ_PHONE_STATE" />`);
+  rp.push("android.permission.READ_PHONE_STATE");
+}
+if (cfg.enableCallPhone) {
+  mp.push(`<uses-permission android:name="android.permission.CALL_PHONE" />`);
+  rp.push("android.permission.CALL_PHONE");
+}
+
+// ─── Contacts ───
+if (cfg.enableReadContacts) {
+  mp.push(`<uses-permission android:name="android.permission.READ_CONTACTS" />`);
+  rp.push("android.permission.READ_CONTACTS");
+}
+if (cfg.enableWriteContacts) {
+  mp.push(`<uses-permission android:name="android.permission.WRITE_CONTACTS" />`);
+  rp.push("android.permission.WRITE_CONTACTS");
+}
+
+// ─── Accounts ───
+if (cfg.enableGetAccounts) {
+  mp.push(`<uses-permission android:name="android.permission.GET_ACCOUNTS" />`);
+  rp.push("android.permission.GET_ACCOUNTS");
+}
+
+// ─── SMS ───
+if (cfg.enableSendSms) {
+  mp.push(`<uses-permission android:name="android.permission.SEND_SMS" />`);
+  rp.push("android.permission.SEND_SMS");
+}
+if (cfg.enableReceiveSms) {
+  mp.push(`<uses-permission android:name="android.permission.RECEIVE_SMS" />`);
+  rp.push("android.permission.RECEIVE_SMS");
+}
+if (cfg.enableReadSms) {
+  mp.push(`<uses-permission android:name="android.permission.READ_SMS" />`);
+  rp.push("android.permission.READ_SMS");
+}
+
+// ─── Calendar ───
+if (cfg.enableReadCalendar) {
+  mp.push(`<uses-permission android:name="android.permission.READ_CALENDAR" />`);
+  rp.push("android.permission.READ_CALENDAR");
+}
+if (cfg.enableWriteCalendar) {
+  mp.push(`<uses-permission android:name="android.permission.WRITE_CALENDAR" />`);
+  rp.push("android.permission.WRITE_CALENDAR");
+}
+
+// ─── Notifications ───
+if (cfg.enableNotifications) {
+  mp.push(`<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />`);
+  rp.push("android.permission.POST_NOTIFICATIONS");
+}
+
+// ─── Foreground service ───
+if (cfg.enableForegroundService) {
+  mp.push(`<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />`);
+}
+
+// ─── Boot ───
+if (cfg.enableBootCompleted) {
+  mp.push(`<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />`);
+}
+
+// ─── Shortcut ───
+if (cfg.enableInstallShortcut) {
+  mp.push(`<uses-permission android:name="android.permission.INSTALL_SHORTCUT" />`);
+}
+
+// ─── System alert window ───
+if (cfg.enableSystemAlertWindow) {
+  mp.push(`<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />`);
+}
+
+// ─── Install packages ───
+if (cfg.enableInstallPackages) {
+  mp.push(`<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />`);
+}
+
+// ─── Biometric ───
+if (cfg.enableBiometric) {
+  mp.push(`<uses-permission android:name="android.permission.USE_BIOMETRIC" />`);
+  rp.push("android.permission.USE_BIOMETRIC");
+}
+if (cfg.enableFingerprint) {
+  mp.push(`<uses-permission android:name="android.permission.USE_FINGERPRINT" />`);
+  rp.push("android.permission.USE_FINGERPRINT");
+}
+
+console.log("Manifest permissions:", mp.length);
+console.log("Runtime permissions:", rp.length);
+
+// ─── Manifest ───
 const orientationAttr =
   cfg.orientation === "landscape" ? 'android:screenOrientation="landscape"'
   : cfg.orientation === "portrait" ? 'android:screenOrientation="portrait"'
@@ -156,7 +340,9 @@ const manifest =
 `<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-  ${permissions.join("\n  ")}
+  ${mp.join("\n  ")}
+
+  ${mf.join("\n  ")}
 
   <application
       android:allowBackup="true"
@@ -165,13 +351,15 @@ const manifest =
       android:roundIcon="@mipmap/ic_launcher"
       android:supportsRtl="true"
       android:usesCleartextTraffic="false"
+      android:hardwareAccelerated="true"
       android:networkSecurityConfig="@xml/network_security_config"
       android:theme="@style/AppTheme">
 
       <activity
           android:name=".MainActivity"
           android:exported="true"
-          android:configChanges="orientation|screenSize|keyboardHidden"
+          android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"
+          android:hardwareAccelerated="true"
           ${orientationAttr}>
           <intent-filter>
               <action android:name="android.intent.action.MAIN" />
@@ -183,30 +371,25 @@ const manifest =
 `;
 fs.writeFileSync(path.join(ROOT, "app/src/main/AndroidManifest.xml"), manifest);
 
-// ---------- res/values/strings.xml ----------
-fs.writeFileSync(
-  path.join(resDir, "values/strings.xml"),
+// ─────────────── res/values/strings.xml ───────────────
+fs.writeFileSync(path.join(resDir, "values/strings.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <resources>
   <string name="app_name">${escapeXml(cfg.appName)}</string>
 </resources>
-`
-);
+`);
 
-// ---------- res/values/colors.xml ----------
-fs.writeFileSync(
-  path.join(resDir, "values/colors.xml"),
+// ─────────────── res/values/colors.xml ───────────────
+fs.writeFileSync(path.join(resDir, "values/colors.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <resources>
   <color name="theme_color">${cfg.themeColor}</color>
   <color name="theme_color_dark">${cfg.themeColor}</color>
 </resources>
-`
-);
+`);
 
-// ---------- res/values/styles.xml ----------
-fs.writeFileSync(
-  path.join(resDir, "values/styles.xml"),
+// ─────────────── res/values/styles.xml ───────────────
+fs.writeFileSync(path.join(resDir, "values/styles.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <resources>
   <style name="AppTheme" parent="Theme.AppCompat.Light.NoActionBar">
@@ -216,12 +399,10 @@ fs.writeFileSync(
     <item name="android:windowBackground">@android:color/white</item>
   </style>
 </resources>
-`
-);
+`);
 
-// ---------- network security ----------
-fs.writeFileSync(
-  path.join(resDir, "xml/network_security_config.xml"),
+// ─────────────── network security config ───────────────
+fs.writeFileSync(path.join(resDir, "xml/network_security_config.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
   <base-config cleartextTrafficPermitted="false">
@@ -230,10 +411,11 @@ fs.writeFileSync(
     </trust-anchors>
   </base-config>
 </network-security-config>
-`
-);
+`);
 
-// ---------- ICON HANDLING ----------
+// ═══════════════════════════════════════════════════════════════
+// ICON HANDLING
+// ═══════════════════════════════════════════════════════════════
 const iconSizes = {
   "mipmap-mdpi": 48,
   "mipmap-hdpi": 72,
@@ -248,7 +430,7 @@ if (cfg.iconBase64) {
   if (m) {
     userIconPath = path.join(ROOT, ".user-icon.png");
     fs.writeFileSync(userIconPath, Buffer.from(m[1], "base64"));
-    console.log("User icon saved, size:", fs.statSync(userIconPath).size, "bytes");
+    console.log("User icon saved:", fs.statSync(userIconPath).size, "bytes");
   } else {
     console.log("Icon base64 present but regex didn't match");
   }
@@ -263,7 +445,7 @@ try {
   console.log("ImageMagick available");
 } catch {
   magickOk = false;
-  console.log("ImageMagick NOT available — will use fallback icons");
+  console.log("ImageMagick NOT available — using fallback solid color");
 }
 
 for (const [dir, size] of Object.entries(iconSizes)) {
@@ -285,7 +467,7 @@ for (const [dir, size] of Object.entries(iconSizes)) {
         { stdio: "pipe" }
       );
       done = true;
-      console.log(`✓ Icon ${dir} (${size}x${size}) generated from user icon`);
+      console.log(`✓ Icon ${dir} (${size}x${size}) from user icon`);
     } catch (e) {
       console.warn(`✗ ImageMagick failed for ${dir}: ${e.message}`);
     }
@@ -293,45 +475,47 @@ for (const [dir, size] of Object.entries(iconSizes)) {
 
   if (!done) {
     fs.writeFileSync(dest, generateSolidPng(cfg.themeColor, size));
-    console.log(`→ Icon ${dir} (${size}x${size}) using fallback solid color`);
+    console.log(`→ Icon ${dir} (${size}x${size}) using fallback color`);
   }
 }
 
-// NOTE: We intentionally do NOT create mipmap-anydpi-v26/ic_launcher.xml
-// because it causes a recursive reference loop on Android 8+ (defaults to robot icon)
-// PNG mipmaps are used directly by Android launcher.
-
 if (userIconPath && fs.existsSync(userIconPath)) fs.unlinkSync(userIconPath);
 
-// ---------- assets/config.json ----------
-fs.writeFileSync(
-  path.join(assetsDir, "config.json"),
-  JSON.stringify(
-    {
-      websiteUrl: cfg.websiteUrl,
-      themeColor: cfg.themeColor,
-      enableJs: cfg.enableJs,
-      enableFileUpload: cfg.enableFileUpload,
-      enableCamera: cfg.enableCamera,
-      enableGeolocation: cfg.enableGeolocation,
-      orientation: cfg.orientation,
-    },
-    null,
-    2
-  )
+// ─────────────── assets/config.json ───────────────
+fs.writeFileSync(path.join(assetsDir, "config.json"),
+  JSON.stringify({
+    websiteUrl: cfg.websiteUrl,
+    themeColor: cfg.themeColor,
+    enableJs: cfg.enableJs,
+    enableFileUpload: cfg.enableFileUpload,
+    enableCamera: cfg.enableCamera,
+    enableMicrophone: cfg.enableMicrophone,
+    enableGeolocation: cfg.enableGeolocation,
+    orientation: cfg.orientation,
+  }, null, 2)
 );
 
-// ---------- MainActivity.kt ----------
+// ═══════════════════════════════════════════════════════════════
+// MainActivity.kt
+// ═══════════════════════════════════════════════════════════════
+const permsArrayKt = rp.length > 0
+  ? rp.map(p => `"${p}"`).join(", ")
+  : "";
+
 const mainActivity =
 `package ${cfg.packageName}
 
 import android.annotation.SuppressLint
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.webkit.*
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import org.json.JSONObject
 
 class MainActivity : AppCompatActivity() {
@@ -339,6 +523,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private val fileChooserRequestCode = 1001
+    private val permissionRequestCode = 2001
+
+    // Runtime permissions requested at first launch (auto-generated from config)
+    private val startupPermissions = arrayOf(${permsArrayKt})
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -367,7 +555,9 @@ class MainActivity : AppCompatActivity() {
             setSupportZoom(false)
             builtInZoomControls = false
             javaScriptCanOpenWindowsAutomatically = true
-            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            }
         }
 
         webView.webViewClient = object : WebViewClient() {
@@ -377,39 +567,43 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        if (config.optBoolean("enableFileUpload", true)) {
-            webView.webChromeClient = object : WebChromeClient() {
-                override fun onShowFileChooser(
-                    webView: WebView?,
-                    filePathCallback: ValueCallback<Array<Uri>>?,
-                    fileChooserParams: FileChooserParams?
-                ): Boolean {
-                    this@MainActivity.filePathCallback?.onReceiveValue(null)
-                    this@MainActivity.filePathCallback = filePathCallback
-                    val intent = fileChooserParams?.createIntent()
-                    return try {
-                        if (intent != null) {
-                            startActivityForResult(intent, fileChooserRequestCode)
-                            true
-                        } else {
-                            this@MainActivity.filePathCallback = null
-                            false
-                        }
-                    } catch (e: Exception) {
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(
+                webView: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?
+            ): Boolean {
+                this@MainActivity.filePathCallback?.onReceiveValue(null)
+                this@MainActivity.filePathCallback = filePathCallback
+                val intent = fileChooserParams?.createIntent()
+                return try {
+                    if (intent != null) {
+                        startActivityForResult(intent, fileChooserRequestCode)
+                        true
+                    } else {
                         this@MainActivity.filePathCallback = null
                         false
                     }
+                } catch (e: Exception) {
+                    this@MainActivity.filePathCallback = null
+                    false
                 }
+            }
 
-                override fun onGeolocationPermissionsShowPrompt(
-                    origin: String?,
-                    callback: GeolocationPermissions.Callback?
-                ) {
-                    if (config.optBoolean("enableGeolocation", false)) {
-                        callback?.invoke(origin, true, false)
-                    } else {
-                        super.onGeolocationPermissionsShowPrompt(origin, callback)
-                    }
+            // Grant web page requests (camera, mic) automatically
+            override fun onPermissionRequest(request: PermissionRequest?) {
+                request?.grant(request.resources)
+            }
+
+            // Geolocation from web page
+            override fun onGeolocationPermissionsShowPrompt(
+                origin: String?,
+                callback: GeolocationPermissions.Callback?
+            ) {
+                if (config.optBoolean("enableGeolocation", false)) {
+                    callback?.invoke(origin, true, false)
+                } else {
+                    super.onGeolocationPermissionsShowPrompt(origin, callback)
                 }
             }
         }
@@ -420,7 +614,30 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
+        // Request runtime permissions before loading URL
+        if (startupPermissions.isNotEmpty()) {
+            requestStartupPermissions()
+        }
+
         webView.loadUrl(config.optString("websiteUrl", "https://example.com"))
+    }
+
+    private fun requestStartupPermissions() {
+        val missing = startupPermissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, missing.toTypedArray(), permissionRequestCode)
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        // Silent — user may grant or deny; WebView handles gracefully
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
@@ -447,15 +664,17 @@ class MainActivity : AppCompatActivity() {
 fs.writeFileSync(path.join(javaDir, "MainActivity.kt"), mainActivity);
 
 console.log("✅ Android project generated at", ROOT);
+console.log("Manifest permissions:", mp.length, "| Runtime permissions:", rp.length);
 
-// ---------- helpers ----------
+// ═══════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════
 function escapeXml(s) {
   return String(s).replace(/[<>&'"]/g, (c) => ({
     "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;"
   }[c]));
 }
 
-/** Generate a solid-color PNG at given size (default 192x192). */
 function generateSolidPng(hex, size = 192) {
   const { deflateSync } = require("zlib");
   const r = parseInt(hex.slice(1, 3), 16) || 0x1f;
