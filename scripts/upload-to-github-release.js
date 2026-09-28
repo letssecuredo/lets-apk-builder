@@ -1,16 +1,5 @@
 #!/usr/bin/env node
-/**
- * Uploads an APK to a GitHub Release and prints the public download URL.
- * Usage: node upload-to-github-release.js <apkPath> <buildId>
- *
- * Requires env vars:
- *   GITHUB_TOKEN     — provided automatically by Actions
- *   GITHUB_REPOSITORY — provided automatically by Actions (owner/repo)
- *   GH_API_URL       — optional, defaults to https://api.github.com
- */
 const fs = require("fs");
-const path = require("path");
-const fetch = require("node-fetch");
 
 const apkPath = process.argv[2];
 const buildId = process.argv[3];
@@ -34,7 +23,6 @@ const assetName = "app-release.apk";
 const releaseName = `Build ${buildId.slice(0, 8)}`;
 
 (async () => {
-  // 1. Create release
   const createRes = await fetch(`${api}/repos/${repo}/releases`, {
     method: "POST",
     headers: {
@@ -46,7 +34,7 @@ const releaseName = `Build ${buildId.slice(0, 8)}`;
     body: JSON.stringify({
       tag_name: tag,
       name: releaseName,
-      body: `APK for build \`${buildId}\`.\n\nDownload: [app-release.apk](https://github.com/${repo}/releases/download/${tag}/${assetName})`,
+      body: `APK for build \`${buildId}\`.`,
       draft: false,
       prerelease: false,
     }),
@@ -61,11 +49,8 @@ const releaseName = `Build ${buildId.slice(0, 8)}`;
   const release = await createRes.json();
   console.log("Release created:", release.html_url);
 
-  // 2. Upload asset
   const uploadUrl = `https://uploads.github.com/repos/${repo}/releases/${release.id}/assets?name=${assetName}`;
   const fileBuffer = fs.readFileSync(apkPath);
-  const sizeMB = (fileBuffer.length / 1024 / 1024).toFixed(2);
-  console.log(`Uploading ${assetName} (${sizeMB} MB)...`);
 
   const uploadRes = await fetch(uploadUrl, {
     method: "POST",
@@ -85,7 +70,6 @@ const releaseName = `Build ${buildId.slice(0, 8)}`;
   }
 
   const asset = await uploadRes.json();
-  // Public download URL — printed to stdout (captured by workflow)
   console.log(asset.browser_download_url);
 })().catch((e) => {
   console.error("Error:", e.message);
