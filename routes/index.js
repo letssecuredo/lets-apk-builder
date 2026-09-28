@@ -13,8 +13,9 @@ router.get("/build/:id", apiLimiter, optionalAuth, ctrl.getBuildById);
 router.get("/download/:id", apiLimiter, ctrl.downloadBuild);
 router.get("/builds", apiLimiter, optionalAuth, ctrl.listBuildsHandler);
 
-// ⭐ Internal endpoint — worker only
+// Worker-only endpoints
 router.get("/internal/config/:buildId", ctrl.getInternalConfig);
+router.get("/internal/zip/:buildId", ctrl.getInternalZip);
 
 router.get("/health", (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
