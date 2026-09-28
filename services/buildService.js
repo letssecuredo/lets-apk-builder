@@ -3,6 +3,7 @@ const { nowIso } = require("../utils/helpers");
 const logger = require("../utils/logger");
 
 const COLLECTION = "builds";
+const CHUNK_SIZE = 700_000; // ~700 KB per Firestore doc
 
 async function saveBuild(build) {
   const db = getDb();
@@ -55,4 +56,46 @@ function newBuildRecord({ id, config, userId }) {
   };
 }
 
-module.exports = { saveBuild, getBuild, updateBuild, listBuilds, appendLog, newBuildRecord };
+// ═══════════════════════════════════════════════
+// OFFLINE ZIP — chunked storage
+// ═══════════════════════════════════════════════
+async function saveZipChunks(buildId, base64, name, size) {
+  const db = getDb();
+  const total = Math.ceil(base64.length / CHUNK_SIZE) || 1;
+  const batch = db.batch();
+
+  for (let i = 0; i < total; i++) {
+    const slice = base64.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+    const ref = db.collection(COLLECTION).doc(buildId).collection("zipchunks").doc(String(i));
+    batch.set(ref, { data: slice, index: i });
+  }
+  batch.set(
+    db.collection(COLLECTION).doc(buildId).collection("zipchunks").doc("meta"),
+    { total, name: name || "site.zip", size: size || 0 }
+  );
+
+  await batch.commit();
+  logger.info("zip chunks saved", buildId, `${total} chunks`);
+  return total;
+}
+
+async function getZipChunks(buildId) {
+  const db = getDb();
+  const metaSnap = await db.collection(COLLECTION).doc(buildId)
+    .collection("zipchunks").doc("meta").get();
+  if (!metaSnap.exists) return null;
+
+  const { total, name, size } = metaSnap.data();
+  const parts = [];
+  for (let i = 0; i < total; i++) {
+    const snap = await db.collection(COLLECTION).doc(buildId)
+      .collection("zipchunks").doc(String(i)).get();
+    if (snap.exists) parts.push(snap.data().data);
+  }
+  return { base64: parts.join(""), name, size };
+}
+
+module.exports = {
+  saveBuild, getBuild, updateBuild, listBuilds, appendLog, newBuildRecord,
+  saveZipChunks, getZipChunks,
+};
