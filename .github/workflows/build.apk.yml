@@ -13,6 +13,10 @@ on:
         description: "Webhook callback URL"
         required: true
 
+# ⚠️ Required for creating GitHub Releases
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -28,7 +32,7 @@ jobs:
           node-version: "20"
 
       - name: Install worker deps
-        run: npm install --no-save firebase-admin node-fetch@2
+        run: npm install --no-save node-fetch@2
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -53,8 +57,6 @@ jobs:
       - name: Parse config
         run: |
           echo '${{ github.event.inputs.configJson }}' > config.json
-          echo "--- config.json ---"
-          cat config.json | head -c 500
 
       - name: Generate Android project
         run: node scripts/generate-project.js config.json
@@ -73,10 +75,7 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
           echo "$KEYSTORE_BASE64" | base64 -d > keystore.jks
-          UNSIGNED=android-project/app/build/outputs/apk/release/app-release-unsigned.apk
-          if [ ! -f "$UNSIGNED" ]; then
-            UNSIGNED=$(find android-project/app/build/outputs/apk/release -name "*.apk" | head -n1)
-          fi
+          UNSIGNED=$(find android-project/app/build/outputs/apk/release -name "*.apk" | head -n1)
           BT=$(ls $ANDROID_HOME/build-tools | sort -V | tail -n1)
           $ANDROID_HOME/build-tools/$BT/zipalign -v -p 4 "$UNSIGNED" app-aligned.apk
           $ANDROID_HOME/build-tools/$BT/apksigner sign \
@@ -87,7 +86,6 @@ jobs:
             --out app-signed.apk \
             app-aligned.apk
           $ANDROID_HOME/build-tools/$BT/apksigner verify app-signed.apk
-          ls -la app-signed.apk
 
       - name: Notify signing
         env:
@@ -96,15 +94,15 @@ jobs:
           WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
         run: node scripts/notify-webhook.js signing
 
-      - name: Upload to Firebase Storage
+      - name: Upload to GitHub Releases
         id: upload
         env:
-          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-          FIREBASE_STORAGE_BUCKET: ${{ secrets.FIREBASE_STORAGE_BUCKET }}
-          BUILD_ID: ${{ github.event.inputs.buildId }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}          # ⚠️ auto-provided
+          GITHUB_REPOSITORY: ${{ github.repository }}         # ⚠️ auto-provided
         run: |
-          APK_URL=$(node scripts/upload-to-firebase.js app-signed.apk "$BUILD_ID")
+          APK_URL=$(node scripts/upload-to-github-release.js app-signed.apk "${{ github.event.inputs.buildId }}" | tail -n1)
           echo "apk_url=$APK_URL" >> "$GITHUB_OUTPUT"
+          echo "Uploaded to: $APK_URL"
 
       - name: Notify completed
         if: success()
@@ -121,4 +119,4 @@ jobs:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           BUILD_ID: ${{ github.event.inputs.buildId }}
           WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
-        run: node scripts/notify-webhook.js failed "Build failed. Check GitHub Actions logs for details."
+        run: node scripts/notify-webhook.js failed "Build failed. Check GitHub Actions logs."
