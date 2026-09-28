@@ -1,13 +1,11 @@
 const admin = require("firebase-admin");
 
 let db = null;
-let bucket = null;
 
 function initFirebase() {
   if (admin.apps.length) {
     db = admin.firestore();
-    bucket = admin.storage().bucket();
-    return { db, bucket };
+    return { db };
   }
 
   const privateKey = (process.env.FIREBASE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
@@ -18,12 +16,11 @@ function initFirebase() {
       clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
       privateKey,
     }),
-    storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
+    // ❌ No storageBucket — we use GitHub Releases for APK files
   });
 
   db = admin.firestore();
-  bucket = admin.storage().bucket();
-  return { db, bucket };
+  return { db };
 }
 
 function getDb() {
@@ -31,9 +28,4 @@ function getDb() {
   return db;
 }
 
-function getBucket() {
-  if (!bucket) initFirebase();
-  return bucket;
-}
-
-module.exports = { initFirebase, getDb, getBucket, admin };
+module.exports = { initFirebase, getDb, admin };
