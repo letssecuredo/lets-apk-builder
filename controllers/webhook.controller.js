@@ -3,7 +3,7 @@ const { verifyHmac, isFreshTimestamp, nowIso } = require("../utils/helpers");
 const { record } = require("../services/auditService");
 const logger = require("../utils/logger");
 
-const ALLOWED = new Set(["building", "signing", "uploading", "completed", "failed"]);
+const ALLOWED = new Set(["queued", "building", "signing", "uploading", "completed", "failed"]);
 
 async function githubWebhook(req, res, next) {
   try {
@@ -15,7 +15,7 @@ async function githubWebhook(req, res, next) {
       return res.status(401).json({ error: "Invalid signature" });
     }
 
-    const { buildId, status, apkUrl, error, logs, timestamp } = req.body || {};
+    const { buildId, status, apkUrl, error, logs, currentStep, stepIndex, timestamp } = req.body || {};
     if (!buildId) return res.status(400).json({ error: "buildId required" });
     if (status && !ALLOWED.has(status)) return res.status(400).json({ error: "invalid status" });
     if (!isFreshTimestamp(timestamp)) return res.status(400).json({ error: "stale timestamp" });
@@ -25,11 +25,13 @@ async function githubWebhook(req, res, next) {
     if (apkUrl) patch.apkUrl = apkUrl;
     if (error) patch.error = String(error).slice(0, 4000);
     if (Array.isArray(logs)) patch.logs = logs.slice(0, 500);
+    if (currentStep) patch.currentStep = String(currentStep).slice(0, 200);
+    if (typeof stepIndex === "number") patch.stepIndex = stepIndex;
     if (status === "completed" || status === "failed") patch.completedAt = nowIso();
 
     await updateBuild(buildId, patch);
-    await record("build.webhook", { buildId, status });
-    logger.info("webhook processed", buildId, status);
+    await record("build.webhook", { buildId, status, currentStep });
+    logger.info("webhook processed", buildId, status, currentStep || "");
     res.status(200).json({ ok: true });
   } catch (err) { next(err); }
 }
