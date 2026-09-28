@@ -15,6 +15,22 @@ function assert(cond, message, field) {
   if (!cond) throw new ValidationError(message, field);
 }
 
+// All permission keys the frontend can send
+const PERMISSION_KEYS = [
+  "enableJs","enableNetworkState",
+  "enableCamera","enableMicrophone","enableAudioSettings","enableFileUpload",
+  "enableGeolocation","enableCoarseLocation","enableBackgroundLocation",
+  "enableReadMediaImages","enableReadMediaVideo","enableReadMediaAudio","enableStorage",
+  "enableBluetooth","enableBluetoothLegacy","enableNfc","enableNearbyWifi",
+  "enableWifi","enableChangeWifi","enableChangeNetwork",
+  "enableVibration","enableWakeLock","enableFlashlight","enableBodySensors","enableActivityRecognition",
+  "enableReadPhoneState","enableCallPhone","enableReadContacts","enableWriteContacts","enableGetAccounts",
+  "enableSendSms","enableReceiveSms","enableReadSms",
+  "enableReadCalendar","enableWriteCalendar",
+  "enableNotifications","enableForegroundService","enableBootCompleted","enableInstallShortcut","enableSystemAlertWindow","enableInstallPackages",
+  "enableBiometric","enableFingerprint",
+];
+
 function validateConfig(body) {
   assert(body && typeof body === "object", "Missing request body");
 
@@ -32,10 +48,10 @@ function validateConfig(body) {
   assert(packageName.length <= 100, "packageName too long", "packageName");
 
   const versionName = String(body.versionName || "1.0.0").trim();
-  assert(SEMVER_RE.test(versionName), "versionName must be semver (e.g. 1.0.0)", "versionName");
+  assert(SEMVER_RE.test(versionName), "versionName must be semver", "versionName");
 
   const versionCode = Number(body.versionCode ?? 1);
-  assert(Number.isInteger(versionCode) && versionCode >= 1 && versionCode <= 2100000000, "versionCode must be a positive integer", "versionCode");
+  assert(Number.isInteger(versionCode) && versionCode >= 1 && versionCode <= 2100000000, "versionCode must be positive integer", "versionCode");
 
   const themeColor = String(body.themeColor || "#1f6feb").trim();
   assert(HEX_COLOR_RE.test(themeColor), "themeColor must be a hex color", "themeColor");
@@ -44,36 +60,26 @@ function validateConfig(body) {
   if (iconBase64) {
     const m = iconBase64.match(/^data:image\/png;base64,(.+)$/);
     assert(m, "iconBase64 must be a PNG data URL", "iconBase64");
-    const dataPart = m[1];
-    // ~500 KB binary ≈ 683 KB base64
-    assert(dataPart.length <= 700_000, "Icon must be ≤ 500 KB", "iconBase64");
+    assert(m[1].length <= 700_000, "Icon must be ≤ 500 KB", "iconBase64");
   }
 
   const orientation = String(body.orientation || "portrait");
-  assert(["portrait", "landscape", "auto"].includes(orientation), "orientation must be portrait|landscape|auto", "orientation");
-
-  const bool = (v, dflt) => (typeof v === "boolean" ? v : dflt);
-  const enableJs = bool(body.enableJs, true);
-  const enableFileUpload = bool(body.enableFileUpload, true);
-  const enableCamera = bool(body.enableCamera, false);
-  const enableGeolocation = bool(body.enableGeolocation, false);
-  const enableStorage = bool(body.enableStorage, false);
+  assert(["portrait","landscape","auto"].includes(orientation), "orientation invalid", "orientation");
 
   const config = {
-    appName,
-    websiteUrl,
-    packageName,
-    versionName,
-    versionCode,
-    themeColor,
-    iconBase64,
-    orientation,
-    enableJs,
-    enableFileUpload,
-    enableCamera,
-    enableGeolocation,
-    enableStorage,
+    appName, websiteUrl, packageName, versionName, versionCode,
+    themeColor, iconBase64, orientation,
   };
+
+  // Copy all permission flags (boolean only)
+  for (const key of PERMISSION_KEYS) {
+    config[key] = typeof body[key] === "boolean" ? body[key] : false;
+  }
+
+  // Sensible defaults
+  if (config.enableJs === false && body.enableJs === undefined) config.enableJs = true;
+  if (config.enableFileUpload === false && body.enableFileUpload === undefined) config.enableFileUpload = true;
+  if (config.enableNetworkState === false && body.enableNetworkState === undefined) config.enableNetworkState = true;
 
   const serialized = JSON.stringify(config);
   assert(serialized.length <= 1_000_000, "Config too large (max 1 MB)", "body");
@@ -81,4 +87,4 @@ function validateConfig(body) {
   return config;
 }
 
-module.exports = { validateConfig, ValidationError };
+module.exports = { validateConfig, ValidationError, PERMISSION_KEYS };
