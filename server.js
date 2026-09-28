@@ -31,9 +31,9 @@ app.use(cors({
 app.use(compression());
 app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
 
-// JSON body — smaller limit for webhook, larger for build POST (icon base64)
+// JSON body — larger limit for build POST (icon base64 + optional offline ZIP base64)
 app.use("/api/webhook", express.json({ limit: "256kb" }));
-app.use("/api", express.json({ limit: "2mb" }));
+app.use("/api", express.json({ limit: "10mb" }));
 
 // Firebase
 initFirebase();
