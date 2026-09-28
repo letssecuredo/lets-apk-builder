@@ -2,6 +2,7 @@
 /* Generates a complete Android WebView project from config.json */
 const fs = require("fs");
 const path = require("path");
+const { execSync } = require("child_process");
 
 const configPath = process.argv[2] || "config.json";
 const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
@@ -27,29 +28,35 @@ for (const d of [
   path.join(resDir, "mipmap-xxhdpi"),
   path.join(resDir, "mipmap-xxxhdpi"),
   assetsDir,
-  path.join(ROOT, "gradle/wrapper"),
 ]) fs.mkdirSync(d, { recursive: true });
 
 // ---------- Root build.gradle ----------
 fs.writeFileSync(
   path.join(ROOT, "build.gradle"),
-`// Top-level build file
-buildscript {
-  repositories { google(); mavenCentral() }
-  dependencies {
-    classpath 'com.android.tools.build:gradle:8.5.2'
-    classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.24'
-  }
+`plugins {
+  id 'com.android.application' version '8.5.2' apply false
+  id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
 }
-allprojects { repositories { google(); mavenCentral() } }
 `
 );
 
 // ---------- settings.gradle ----------
 fs.writeFileSync(
   path.join(ROOT, "settings.gradle"),
-`pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
-dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+`pluginManagement {
+  repositories {
+    google()
+    mavenCentral()
+    gradlePluginPortal()
+  }
+}
+dependencyResolutionManagement {
+  repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+  repositories {
+    google()
+    mavenCentral()
+  }
+}
 rootProject.name = "LetsApkBuilder"
 include ':app'
 `
@@ -60,49 +67,14 @@ fs.writeFileSync(
   path.join(ROOT, "gradle.properties"),
 `org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
 android.useAndroidX=true
-android.enableJetifier=true
-kotlin.code.style=official
 android.nonTransitiveRClass=true
+kotlin.code.style=official
 `
 );
 
-// ---------- gradle wrapper ----------
-fs.writeFileSync(
-  path.join(ROOT, "gradle/wrapper/gradle-wrapper.properties"),
-`distributionBase=GRADLE_USER_HOME
-distributionPath=wrapper/dists
-distributionUrl=https\\://services.gradle.org/distributions/gradle-8.7-bin.zip
-zipStoreBase=GRADLE_USER_HOME
-zipStorePath=wrapper/dists
-`
-);
-
-// Download gradle-wrapper.jar from a known source is unreliable in a script; instead
-// we assume `gradle wrapper` was run previously OR use the system gradle.
-// Safer: create a lightweight gradlew that uses system `gradle` (preinstalled on ubuntu-latest with setup-android? not always).
-// Instead we ship a gradle wrapper jar fetched at runtime.
-
-fs.writeFileSync(
-  path.join(ROOT, "gradlew"),
-`#!/bin/sh
-# Lightweight gradle wrapper that downloads gradle if missing
-set -e
-GRADLE_VERSION=8.7
-GRADLE_HOME="$HOME/.gradle-dist/$GRADLE_VERSION"
-if [ ! -x "$GRADLE_HOME/bin/gradle" ]; then
-  mkdir -p "$HOME/.gradle-dist"
-  cd "$HOME/.gradle-dist"
-  if [ ! -f "gradle-$GRADLE_VERSION-bin.zip" ]; then
-    curl -sSL -o gradle-$GRADLE_VERSION-bin.zip "https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip"
-  fi
-  unzip -q -o gradle-$GRADLE_VERSION-bin.zip
-  mv gradle-$GRADLE_VERSION "$GRADLE_HOME"
-  cd - >/dev/null
-fi
-exec "$GRADLE_HOME/bin/gradle" "$@"
-`
-);
-fs.chmodSync(path.join(ROOT, "gradlew"), 0o755);
+// ---------- local.properties ----------
+const sdkDir = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT || "/usr/local/lib/android/sdk";
+fs.writeFileSync(path.join(ROOT, "local.properties"), `sdk.dir=${sdkDir}\n`);
 
 // ---------- app/build.gradle ----------
 const minSdk = 21;
@@ -126,17 +98,16 @@ android {
     versionName "${cfg.versionName}"
   }
 
-  signingConfigs {
-    release {
-      // Signing done externally via apksigner; keep debug fallback
-    }
-  }
-
   buildTypes {
     release {
       minifyEnabled false
+      crunchPngs false
       proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
     }
+  }
+
+  aaptOptions {
+    cruncherEnabled = false
   }
 
   compileOptions {
@@ -144,7 +115,6 @@ android {
     targetCompatibility JavaVersion.VERSION_17
   }
   kotlinOptions { jvmTarget = '17' }
-  buildFeatures { buildConfig = true }
 }
 
 dependencies {
@@ -214,7 +184,7 @@ const manifest =
 `;
 fs.writeFileSync(path.join(ROOT, "app/src/main/AndroidManifest.xml"), manifest);
 
-// ---------- res/values/strings.xml, colors.xml, styles.xml ----------
+// ---------- res/values ----------
 fs.writeFileSync(
   path.join(resDir, "values/strings.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
@@ -261,20 +231,57 @@ fs.writeFileSync(
 `
 );
 
-// ---------- Icon: use provided base64 or generate a placeholder ----------
-let iconBuffer = null;
+// ---------- ICON HANDLING (robust) ----------
+// Sizes for each density
+const iconSizes = {
+  "mipmap-mdpi": 48,
+  "mipmap-hdpi": 72,
+  "mipmap-xhdpi": 96,
+  "mipmap-xxhdpi": 144,
+  "mipmap-xxxhdpi": 192,
+};
+
+let userIconPath = null;
 if (cfg.iconBase64) {
   const m = cfg.iconBase64.match(/^data:image\/png;base64,(.+)$/);
-  if (m) iconBuffer = Buffer.from(m[1], "base64");
+  if (m) {
+    userIconPath = path.join(ROOT, ".user-icon.png");
+    fs.writeFileSync(userIconPath, Buffer.from(m[1], "base64"));
+  }
 }
-// Fallback: solid color 1x1 PNG (will be upscaled by launcher) - we generate a small
-// valid PNG with the theme color.
-if (!iconBuffer) iconBuffer = generateSolidPng(cfg.themeColor);
 
-for (const d of ["mipmap-mdpi", "mipmap-hdpi", "mipmap-xhdpi", "mipmap-xxhdpi", "mipmap-xxxhdpi"]) {
-  fs.writeFileSync(path.join(resDir, d, "ic_launcher.png"), iconBuffer);
+// Try to use ImageMagick to normalize icons
+let magickOk = false;
+try {
+  execSync("which convert", { stdio: "pipe" });
+  magickOk = true;
+} catch { magickOk = false; }
+
+for (const [dir, size] of Object.entries(iconSizes)) {
+  const dest = path.join(resDir, dir, "ic_launcher.png");
+  let done = false;
+
+  if (userIconPath && magickOk) {
+    try {
+      // Force 8-bit sRGB, strip metadata, resize to exact size
+      execSync(
+        `convert "${userIconPath}" -background none -resize ${size}x${size} ` +
+        `-strip -define png:color-type=6 -depth 8 PNG32:"${dest}"`,
+        { stdio: "pipe" }
+      );
+      done = true;
+    } catch (e) {
+      console.warn(`ImageMagick failed for ${dir}: ${e.message}`);
+    }
+  }
+
+  if (!done) {
+    // Generate a solid-color PNG at the correct size
+    fs.writeFileSync(dest, generateSolidPng(cfg.themeColor, size));
+  }
 }
-// Adaptive icon XML fallback
+
+// Adaptive icon
 fs.writeFileSync(
   path.join(resDir, "mipmap-anydpi-v26/ic_launcher.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
@@ -284,6 +291,9 @@ fs.writeFileSync(
 </adaptive-icon>
 `
 );
+
+// Clean up temp icon
+if (userIconPath && fs.existsSync(userIconPath)) fs.unlinkSync(userIconPath);
 
 // ---------- assets/config.json ----------
 fs.writeFileSync(
@@ -433,19 +443,16 @@ function escapeXml(s) {
   }[c]));
 }
 
-/** Generate a minimal valid PNG of a given solid color (uses zlib via Buffer). */
-function generateSolidPng(hex) {
-  // Simple 1x1 RGBA PNG encoder
+/** Generate a solid-color PNG at given size (default 192x192). */
+function generateSolidPng(hex, size = 192) {
   const { deflateSync } = require("zlib");
   const r = parseInt(hex.slice(1, 3), 16) || 0x1f;
   const g = parseInt(hex.slice(3, 5), 16) || 0x6f;
   const b = parseInt(hex.slice(5, 7), 16) || 0xeb;
 
-  const width = 1, height = 1;
-  // PNG signature
+  const width = size, height = size;
   const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
-  // IHDR
   const ihdrData = Buffer.alloc(13);
   ihdrData.writeUInt32BE(width, 0);
   ihdrData.writeUInt32BE(height, 4);
@@ -454,11 +461,20 @@ function generateSolidPng(hex) {
   ihdrData[10] = 0; ihdrData[11] = 0; ihdrData[12] = 0;
   const ihdr = chunk("IHDR", ihdrData);
 
-  // IDAT: raw scanline = filter(0) + RGBA pixel
-  const raw = Buffer.from([0, r, g, b, 255]);
+  // Raw scanlines: each row = filter(0) + RGBA * width
+  const rowSize = 1 + width * 4;
+  const raw = Buffer.alloc(rowSize * height);
+  for (let y = 0; y < height; y++) {
+    const off = y * rowSize;
+    raw[off] = 0;
+    for (let x = 0; x < width; x++) {
+      raw[off + 1 + x * 4] = r;
+      raw[off + 2 + x * 4] = g;
+      raw[off + 3 + x * 4] = b;
+      raw[off + 4 + x * 4] = 255;
+    }
+  }
   const idat = chunk("IDAT", deflateSync(raw));
-
-  // IEND
   const iend = chunk("IEND", Buffer.alloc(0));
 
   return Buffer.concat([sig, ihdr, idat, iend]);
