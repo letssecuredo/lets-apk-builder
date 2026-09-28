@@ -1,6 +1,11 @@
 const fetch = require("node-fetch");
 const logger = require("../utils/logger");
 
+/**
+ * Triggers the GitHub Actions workflow with minimal inputs.
+ * The worker fetches full config from backend via /api/internal/config/:buildId
+ * This avoids the 65 KB input size limit of workflow_dispatch.
+ */
 async function triggerBuildWorkflow(buildId, config) {
   const repo = process.env.GITHUB_REPO;
   const workflow = process.env.GITHUB_WORKFLOW_FILE || "build-apk.yml";
@@ -9,12 +14,14 @@ async function triggerBuildWorkflow(buildId, config) {
   const publicUrl = process.env.PUBLIC_URL;
 
   if (!repo || !token || !publicUrl) {
-    throw new Error("GitHub integration not configured (GITHUB_REPO / GITHUB_TOKEN / PUBLIC_URL)");
+    throw new Error(
+      "GitHub integration not configured (GITHUB_REPO / GITHUB_TOKEN / PUBLIC_URL)"
+    );
   }
 
   const url = `https://api.github.com/repos/${repo}/actions/workflows/${workflow}/dispatches`;
 
-  // ⚡ শুধু ছোট ইনপুট পাঠানো হচ্ছে
+  // ⚡ Only send tiny inputs — worker fetches full config from backend
   const body = {
     ref,
     inputs: {
@@ -41,6 +48,7 @@ async function triggerBuildWorkflow(buildId, config) {
     logger.error("GitHub dispatch failed", res.status, text);
     throw new Error(`GitHub trigger failed: ${res.status} ${text}`);
   }
+
   logger.info("GitHub workflow dispatched", buildId);
 }
 
