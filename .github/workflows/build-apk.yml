@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 25
 
     steps:
-      - name: Notify: Received
+      - name: Notify Received
         env:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           BUILD_ID: ${{ github.event.inputs.buildId }}
@@ -31,7 +31,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Notify: Checked out code
+      - name: Notify Checked out
         env:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           BUILD_ID: ${{ github.event.inputs.buildId }}
@@ -45,7 +45,7 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Notify: Node ready
+      - name: Notify Node ready
         env:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           BUILD_ID: ${{ github.event.inputs.buildId }}
@@ -63,7 +63,7 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Notify: Java ready
+      - name: Notify Java ready
         env:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           BUILD_ID: ${{ github.event.inputs.buildId }}
@@ -79,7 +79,7 @@ jobs:
           echo "PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools" >> $GITHUB_ENV
           sdkmanager --version || true
 
-      - name: Notify: Android SDK ready
+      - name: Notify Android SDK ready
         env:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           BUILD_ID: ${{ github.event.inputs.buildId }}
@@ -92,7 +92,7 @@ jobs:
         run: |
           yes | sdkmanager "platforms;android-34" "build-tools;34.0.0" >/dev/null
 
-      - name: Notify: Build tools ready
+      - name: Notify build tools ready
         env:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           BUILD_ID: ${{ github.event.inputs.buildId }}
@@ -111,14 +111,9 @@ jobs:
             -H "X-Internal-Secret: $WEBHOOK_SECRET" \
             "$BACKEND_URL/api/internal/config/$BUILD_ID" \
             -o config-response.json
-          node -e "
-            const fs = require('fs');
-            const data = JSON.parse(fs.readFileSync('config-response.json', 'utf8'));
-            if (!data.config) throw new Error('No config in response');
-            fs.writeFileSync('config.json', JSON.stringify(data.config, null, 2));
-          "
+          node -e "const fs=require('fs');const data=JSON.parse(fs.readFileSync('config-response.json','utf8'));if(!data.config)throw new Error('No config');fs.writeFileSync('config.json',JSON.stringify(data.config,null,2));"
 
-      - name: Notify: Config fetched
+      - name: Notify config fetched
         env:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           BUILD_ID: ${{ github.event.inputs.buildId }}
@@ -130,7 +125,7 @@ jobs:
       - name: Generate Android project
         run: node scripts/generate-project.js config.json
 
-      - name: Notify: Project generated
+      - name: Notify project generated
         env:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           BUILD_ID: ${{ github.event.inputs.buildId }}
@@ -145,7 +140,7 @@ jobs:
           chmod +x ./gradlew
           ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Notify: APK built
+      - name: Notify APK built
         env:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           BUILD_ID: ${{ github.event.inputs.buildId }}
@@ -174,7 +169,7 @@ jobs:
             app-aligned.apk
           $ANDROID_HOME/build-tools/$BT/apksigner verify app-signed.apk
 
-      - name: Notify: Signed
+      - name: Notify signed
         env:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           BUILD_ID: ${{ github.event.inputs.buildId }}
@@ -192,7 +187,7 @@ jobs:
           APK_URL=$(node scripts/upload-to-github-release.js app-signed.apk "${{ github.event.inputs.buildId }}" | tail -n1)
           echo "apk_url=$APK_URL" >> "$GITHUB_OUTPUT"
 
-      - name: Notify: Uploaded
+      - name: Notify uploaded
         env:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           BUILD_ID: ${{ github.event.inputs.buildId }}
