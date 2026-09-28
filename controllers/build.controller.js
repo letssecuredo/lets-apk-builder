@@ -58,9 +58,32 @@ async function downloadBuild(req, res, next) {
     if (build.status !== "completed" || !build.apkUrl) {
       return res.status(409).json({ error: "Build not completed", status: build.status });
     }
-    // Redirect to signed Firebase URL (already public-read or signed by worker)
     return res.redirect(302, build.apkUrl);
   } catch (err) { next(err); }
 }
 
-module.exports = { createBuild, getBuildById, listBuildsHandler, downloadBuild };
+/**
+ * Internal endpoint — worker only.
+ * Protected by X-Internal-Secret header matching WEBHOOK_SECRET env.
+ * Returns the FULL config including iconBase64.
+ */
+async function getInternalConfig(req, res, next) {
+  try {
+    const secret = req.headers["x-internal-secret"];
+    if (!secret || secret !== process.env.WEBHOOK_SECRET) {
+      logger.warn("internal config: unauthorized", req.ip);
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const build = await getBuild(req.params.buildId);
+    if (!build) return res.status(404).json({ error: "Build not found" });
+
+    res.json({
+      id: build.id,
+      status: build.status,
+      config: build.config,
+    });
+  } catch (err) { next(err); }
+}
+
+module.exports = { createBuild, getBuildById, listBuildsHandler, downloadBuild, getInternalConfig };
