@@ -19,6 +19,9 @@ jobs:
     timeout-minutes: 25
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Notify Received
         env:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
@@ -27,9 +30,6 @@ jobs:
           STEP_NAME: "Received job"
           STEP_INDEX: "1"
         run: node scripts/notify-step.js
-
-      - name: Checkout
-        uses: actions/checkout@v4
 
       - name: Notify Checked out
         env:
