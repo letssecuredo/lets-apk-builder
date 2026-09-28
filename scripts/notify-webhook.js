@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* Sends a signed webhook to the backend. Usage: node notify-webhook.js <status> [error] */
+
 const crypto = require("crypto");
-const fetch = require("node-fetch");
 
 const status = process.argv[2] || "building";
 const errorMsg = process.argv[3] || undefined;
@@ -21,11 +21,14 @@ const body = {
   status,
   timestamp: new Date().toISOString(),
 };
+
 if (APK_URL) body.apkUrl = APK_URL;
 if (errorMsg) body.error = errorMsg;
 
 const payload = JSON.stringify(body);
-const sig = "sha256=" + crypto.createHmac("sha256", SECRET).update(payload).digest("hex");
+const sig =
+  "sha256=" +
+  crypto.createHmac("sha256", SECRET).update(payload).digest("hex");
 
 (async () => {
   try {
@@ -37,10 +40,21 @@ const sig = "sha256=" + crypto.createHmac("sha256", SECRET).update(payload).dige
       },
       body: payload,
     });
-    console.log("Webhook sent", status, res.status, await res.text());
-    if (!res.ok) process.exit(1);
+
+    const text = await res.text();
+
+    console.log("Webhook sent:", {
+      status,
+      httpStatus: res.status,
+      response: text,
+    });
+
+    if (!res.ok) {
+      console.error(`Webhook failed: ${res.status}`);
+      process.exit(1);
+    }
   } catch (e) {
-    console.error("Webhook error:", e.message);
+    console.error("Webhook error:", e);
     process.exit(1);
   }
 })();
