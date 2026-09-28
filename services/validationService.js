@@ -15,20 +15,20 @@ function assert(cond, message, field) {
   if (!cond) throw new ValidationError(message, field);
 }
 
-// All permission keys the frontend can send
 const PERMISSION_KEYS = [
-  "enableJs","enableNetworkState",
-  "enableCamera","enableMicrophone","enableAudioSettings","enableFileUpload",
-  "enableGeolocation","enableCoarseLocation","enableBackgroundLocation",
-  "enableReadMediaImages","enableReadMediaVideo","enableReadMediaAudio","enableStorage",
-  "enableBluetooth","enableBluetoothLegacy","enableNfc","enableNearbyWifi",
-  "enableWifi","enableChangeWifi","enableChangeNetwork",
-  "enableVibration","enableWakeLock","enableFlashlight","enableBodySensors","enableActivityRecognition",
-  "enableReadPhoneState","enableCallPhone","enableReadContacts","enableWriteContacts","enableGetAccounts",
-  "enableSendSms","enableReceiveSms","enableReadSms",
-  "enableReadCalendar","enableWriteCalendar",
-  "enableNotifications","enableForegroundService","enableBootCompleted","enableInstallShortcut","enableSystemAlertWindow","enableInstallPackages",
-  "enableBiometric","enableFingerprint",
+  "enableJs", "enableNetworkState",
+  "enableCamera", "enableMicrophone", "enableAudioSettings", "enableFileUpload",
+  "enableGeolocation", "enableCoarseLocation", "enableBackgroundLocation",
+  "enableReadMediaImages", "enableReadMediaVideo", "enableReadMediaAudio", "enableStorage",
+  "enableBluetooth", "enableBluetoothLegacy", "enableNfc", "enableNearbyWifi",
+  "enableWifi", "enableChangeWifi", "enableChangeNetwork",
+  "enableVibration", "enableWakeLock", "enableFlashlight", "enableBodySensors", "enableActivityRecognition",
+  "enableReadPhoneState", "enableCallPhone", "enableReadContacts", "enableWriteContacts", "enableGetAccounts",
+  "enableSendSms", "enableReceiveSms", "enableReadSms",
+  "enableReadCalendar", "enableWriteCalendar",
+  "enableNotifications", "enableForegroundService", "enableBootCompleted", "enableInstallShortcut",
+  "enableSystemAlertWindow", "enableInstallPackages",
+  "enableBiometric", "enableFingerprint",
 ];
 
 function validateConfig(body) {
@@ -48,10 +48,10 @@ function validateConfig(body) {
   assert(packageName.length <= 100, "packageName too long", "packageName");
 
   const versionName = String(body.versionName || "1.0.0").trim();
-  assert(SEMVER_RE.test(versionName), "versionName must be semver", "versionName");
+  assert(SEMVER_RE.test(versionName), "versionName must be semver (e.g. 1.0.0)", "versionName");
 
   const versionCode = Number(body.versionCode ?? 1);
-  assert(Number.isInteger(versionCode) && versionCode >= 1 && versionCode <= 2100000000, "versionCode must be positive integer", "versionCode");
+  assert(Number.isInteger(versionCode) && versionCode >= 1 && versionCode <= 2100000000, "versionCode must be a positive integer", "versionCode");
 
   const themeColor = String(body.themeColor || "#1f6feb").trim();
   assert(HEX_COLOR_RE.test(themeColor), "themeColor must be a hex color", "themeColor");
@@ -63,26 +63,44 @@ function validateConfig(body) {
     assert(m[1].length <= 700_000, "Icon must be ≤ 500 KB", "iconBase64");
   }
 
+  // ─── Optional offline ZIP ───
+  let offlineZipBase64 = null;
+  let offlineZipName = null;
+  let offlineZipSize = 0;
+  if (body.offlineZipBase64) {
+    const raw = String(body.offlineZipBase64);
+    const dm = raw.match(/^data:[^;]+;base64,(.+)$/);
+    const b64 = dm ? dm[1] : raw;
+
+    assert(b64.length <= 4_500_000, "Offline ZIP must be ≤ 3 MB", "offlineZipBase64");
+    assert(/^[A-Za-z0-9+/=\s]+$/.test(b64), "offlineZipBase64: invalid characters", "offlineZipBase64");
+
+    offlineZipBase64 = b64.replace(/\s+/g, "");
+    offlineZipName = String(body.offlineZipName || "site.zip").slice(0, 80);
+    offlineZipSize = Math.floor((offlineZipBase64.length * 3) / 4);
+  }
+
   const orientation = String(body.orientation || "portrait");
-  assert(["portrait","landscape","auto"].includes(orientation), "orientation invalid", "orientation");
+  assert(["portrait", "landscape", "auto"].includes(orientation), "orientation must be portrait|landscape|auto", "orientation");
 
   const config = {
     appName, websiteUrl, packageName, versionName, versionCode,
     themeColor, iconBase64, orientation,
+    hasOfflineZip: !!offlineZipBase64,
+    offlineZipName,
+    offlineZipSize,
+    offlineZipBase64, // will be pulled out & stored separately
   };
 
-  // Copy all permission flags (boolean only)
   for (const key of PERMISSION_KEYS) {
     config[key] = typeof body[key] === "boolean" ? body[key] : false;
   }
-
-  // Sensible defaults
-  if (config.enableJs === false && body.enableJs === undefined) config.enableJs = true;
-  if (config.enableFileUpload === false && body.enableFileUpload === undefined) config.enableFileUpload = true;
-  if (config.enableNetworkState === false && body.enableNetworkState === undefined) config.enableNetworkState = true;
+  if (body.enableJs === undefined) config.enableJs = true;
+  if (body.enableFileUpload === undefined) config.enableFileUpload = true;
+  if (body.enableNetworkState === undefined) config.enableNetworkState = true;
 
   const serialized = JSON.stringify(config);
-  assert(serialized.length <= 1_000_000, "Config too large (max 1 MB)", "body");
+  assert(serialized.length <= 10_000_000, "Config too large (max 10 MB)", "body");
 
   return config;
 }
