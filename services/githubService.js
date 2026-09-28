@@ -13,14 +13,17 @@ async function triggerBuildWorkflow(buildId, config) {
   }
 
   const url = `https://api.github.com/repos/${repo}/actions/workflows/${workflow}/dispatches`;
+
+  // ⚡ শুধু ছোট ইনপুট পাঠানো হচ্ছে
   const body = {
     ref,
     inputs: {
       buildId,
-      configJson: JSON.stringify(config),
       webhookUrl: `${publicUrl}/api/webhook/github`,
     },
   };
+
+  logger.info("Dispatching workflow", { buildId, repo, workflow, ref });
 
   const res = await fetch(url, {
     method: "POST",
