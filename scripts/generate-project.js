@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /* Generates a complete Android WebView project from config.json
- * Supports 40+ Android permissions across 12 categories.
+ * Supports 40+ permissions + optional offline ZIP bundling.
  */
 const fs = require("fs");
 const path = require("path");
@@ -18,7 +18,7 @@ const assetsDir = path.join(ROOT, "app/src/main/assets");
 // Clean
 fs.rmSync(ROOT, { recursive: true, force: true });
 
-// Dirs (no adaptive icon XML — PNG mipmaps only to avoid recursive loop)
+// Dirs
 for (const d of [
   javaDir,
   path.join(resDir, "values"),
@@ -30,6 +30,28 @@ for (const d of [
   path.join(resDir, "mipmap-xxxhdpi"),
   assetsDir,
 ]) fs.mkdirSync(d, { recursive: true });
+
+// ─── Offline ZIP extraction (before MainActivity is written) ───
+const offlineZipB64Path = path.join(process.cwd(), "offline.zip.b64");
+let hasOffline = false;
+if (fs.existsSync(offlineZipB64Path)) {
+  const b64 = fs.readFileSync(offlineZipB64Path, "utf8").trim();
+  if (b64) {
+    try {
+      const zipBuffer = Buffer.from(b64, "base64");
+      const zipPath = path.join(process.cwd(), "offline.zip");
+      fs.writeFileSync(zipPath, zipBuffer);
+      console.log("Extracting offline ZIP:", zipBuffer.length, "bytes");
+      execSync(`unzip -q -o "${zipPath}" -d "${assetsDir}"`, { stdio: "inherit" });
+      fs.unlinkSync(zipPath);
+      hasOffline = true;
+      console.log("✓ Offline assets extracted to assets/");
+    } catch (e) {
+      console.warn("Offline ZIP extraction failed:", e.message);
+    }
+  }
+}
+console.log("hasOffline:", hasOffline);
 
 // ─────────────── Root build.gradle ───────────────
 fs.writeFileSync(path.join(ROOT, "build.gradle"),
@@ -116,38 +138,30 @@ fs.writeFileSync(path.join(ROOT, "app/proguard-rules.pro"),
 `);
 
 // ═══════════════════════════════════════════════════════════════
-// MANIFEST — build permission & feature list from config flags
+// MANIFEST
 // ═══════════════════════════════════════════════════════════════
-const mp = []; // <uses-permission>
-const mf = []; // <uses-feature>
-const rp = []; // runtime permissions to request at startup
+const mp = [];
+const mf = [];
+const rp = [];
 
-// Always
 mp.push(`<uses-permission android:name="android.permission.INTERNET" />`);
 
-// ─── Network ───
 if (cfg.enableNetworkState) mp.push(`<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />`);
 if (cfg.enableChangeNetwork) mp.push(`<uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />`);
 
-// ─── Camera ───
 if (cfg.enableCamera) {
   mp.push(`<uses-permission android:name="android.permission.CAMERA" />`);
   mf.push(`<uses-feature android:name="android.hardware.camera" android:required="false" />`);
   mf.push(`<uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />`);
   rp.push("android.permission.CAMERA");
 }
-
-// ─── Microphone ───
 if (cfg.enableMicrophone) {
   mp.push(`<uses-permission android:name="android.permission.RECORD_AUDIO" />`);
   mf.push(`<uses-feature android:name="android.hardware.microphone" android:required="false" />`);
   rp.push("android.permission.RECORD_AUDIO");
 }
-
-// ─── Audio settings ───
 if (cfg.enableAudioSettings) mp.push(`<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />`);
 
-// ─── Location ───
 if (cfg.enableGeolocation) {
   mp.push(`<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />`);
   rp.push("android.permission.ACCESS_FINE_LOCATION");
@@ -164,7 +178,6 @@ if (cfg.enableGeolocation || cfg.enableCoarseLocation || cfg.enableBackgroundLoc
   mf.push(`<uses-feature android:name="android.hardware.location.gps" android:required="false" />`);
 }
 
-// ─── Storage ───
 if (cfg.enableReadMediaImages) {
   mp.push(`<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />`);
   rp.push("android.permission.READ_MEDIA_IMAGES");
@@ -183,7 +196,6 @@ if (cfg.enableStorage || cfg.enableFileUpload) {
   rp.push("android.permission.READ_EXTERNAL_STORAGE");
 }
 
-// ─── Bluetooth ───
 if (cfg.enableBluetooth) {
   mp.push(`<uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />`);
   mp.push(`<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />`);
@@ -197,46 +209,30 @@ if (cfg.enableBluetoothLegacy) {
   mp.push(`<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />`);
 }
 
-// ─── NFC ───
 if (cfg.enableNfc) {
   mp.push(`<uses-permission android:name="android.permission.NFC" />`);
   mf.push(`<uses-feature android:name="android.hardware.nfc" android:required="false" />`);
 }
-
-// ─── Nearby WiFi ───
 if (cfg.enableNearbyWifi) {
   mp.push(`<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" />`);
   rp.push("android.permission.NEARBY_WIFI_DEVICES");
 }
-
-// ─── WiFi ───
 if (cfg.enableWifi) mp.push(`<uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />`);
 if (cfg.enableChangeWifi) mp.push(`<uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />`);
 
-// ─── Vibration ───
 if (cfg.enableVibration) mp.push(`<uses-permission android:name="android.permission.VIBRATE" />`);
-
-// ─── Wake lock ───
 if (cfg.enableWakeLock) mp.push(`<uses-permission android:name="android.permission.WAKE_LOCK" />`);
+if (cfg.enableFlashlight) mf.push(`<uses-feature android:name="android.hardware.camera.flash" android:required="false" />`);
 
-// ─── Flashlight ───
-if (cfg.enableFlashlight) {
-  mf.push(`<uses-feature android:name="android.hardware.camera.flash" android:required="false" />`);
-}
-
-// ─── Body sensors ───
 if (cfg.enableBodySensors) {
   mp.push(`<uses-permission android:name="android.permission.BODY_SENSORS" />`);
   rp.push("android.permission.BODY_SENSORS");
 }
-
-// ─── Activity recognition ───
 if (cfg.enableActivityRecognition) {
   mp.push(`<uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />`);
   rp.push("android.permission.ACTIVITY_RECOGNITION");
 }
 
-// ─── Phone ───
 if (cfg.enableReadPhoneState) {
   mp.push(`<uses-permission android:name="android.permission.READ_PHONE_STATE" />`);
   rp.push("android.permission.READ_PHONE_STATE");
@@ -246,7 +242,6 @@ if (cfg.enableCallPhone) {
   rp.push("android.permission.CALL_PHONE");
 }
 
-// ─── Contacts ───
 if (cfg.enableReadContacts) {
   mp.push(`<uses-permission android:name="android.permission.READ_CONTACTS" />`);
   rp.push("android.permission.READ_CONTACTS");
@@ -255,14 +250,11 @@ if (cfg.enableWriteContacts) {
   mp.push(`<uses-permission android:name="android.permission.WRITE_CONTACTS" />`);
   rp.push("android.permission.WRITE_CONTACTS");
 }
-
-// ─── Accounts ───
 if (cfg.enableGetAccounts) {
   mp.push(`<uses-permission android:name="android.permission.GET_ACCOUNTS" />`);
   rp.push("android.permission.GET_ACCOUNTS");
 }
 
-// ─── SMS ───
 if (cfg.enableSendSms) {
   mp.push(`<uses-permission android:name="android.permission.SEND_SMS" />`);
   rp.push("android.permission.SEND_SMS");
@@ -276,7 +268,6 @@ if (cfg.enableReadSms) {
   rp.push("android.permission.READ_SMS");
 }
 
-// ─── Calendar ───
 if (cfg.enableReadCalendar) {
   mp.push(`<uses-permission android:name="android.permission.READ_CALENDAR" />`);
   rp.push("android.permission.READ_CALENDAR");
@@ -286,38 +277,16 @@ if (cfg.enableWriteCalendar) {
   rp.push("android.permission.WRITE_CALENDAR");
 }
 
-// ─── Notifications ───
 if (cfg.enableNotifications) {
   mp.push(`<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />`);
   rp.push("android.permission.POST_NOTIFICATIONS");
 }
+if (cfg.enableForegroundService) mp.push(`<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />`);
+if (cfg.enableBootCompleted) mp.push(`<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />`);
+if (cfg.enableInstallShortcut) mp.push(`<uses-permission android:name="android.permission.INSTALL_SHORTCUT" />`);
+if (cfg.enableSystemAlertWindow) mp.push(`<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />`);
+if (cfg.enableInstallPackages) mp.push(`<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />`);
 
-// ─── Foreground service ───
-if (cfg.enableForegroundService) {
-  mp.push(`<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />`);
-}
-
-// ─── Boot ───
-if (cfg.enableBootCompleted) {
-  mp.push(`<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />`);
-}
-
-// ─── Shortcut ───
-if (cfg.enableInstallShortcut) {
-  mp.push(`<uses-permission android:name="android.permission.INSTALL_SHORTCUT" />`);
-}
-
-// ─── System alert window ───
-if (cfg.enableSystemAlertWindow) {
-  mp.push(`<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />`);
-}
-
-// ─── Install packages ───
-if (cfg.enableInstallPackages) {
-  mp.push(`<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />`);
-}
-
-// ─── Biometric ───
 if (cfg.enableBiometric) {
   mp.push(`<uses-permission android:name="android.permission.USE_BIOMETRIC" />`);
   rp.push("android.permission.USE_BIOMETRIC");
@@ -330,7 +299,6 @@ if (cfg.enableFingerprint) {
 console.log("Manifest permissions:", mp.length);
 console.log("Runtime permissions:", rp.length);
 
-// ─── Manifest ───
 const orientationAttr =
   cfg.orientation === "landscape" ? 'android:screenOrientation="landscape"'
   : cfg.orientation === "portrait" ? 'android:screenOrientation="portrait"'
@@ -371,7 +339,7 @@ const manifest =
 `;
 fs.writeFileSync(path.join(ROOT, "app/src/main/AndroidManifest.xml"), manifest);
 
-// ─────────────── res/values/strings.xml ───────────────
+// ─── res/values ───
 fs.writeFileSync(path.join(resDir, "values/strings.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <resources>
@@ -379,7 +347,6 @@ fs.writeFileSync(path.join(resDir, "values/strings.xml"),
 </resources>
 `);
 
-// ─────────────── res/values/colors.xml ───────────────
 fs.writeFileSync(path.join(resDir, "values/colors.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <resources>
@@ -388,7 +355,6 @@ fs.writeFileSync(path.join(resDir, "values/colors.xml"),
 </resources>
 `);
 
-// ─────────────── res/values/styles.xml ───────────────
 fs.writeFileSync(path.join(resDir, "values/styles.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <resources>
@@ -401,7 +367,6 @@ fs.writeFileSync(path.join(resDir, "values/styles.xml"),
 </resources>
 `);
 
-// ─────────────── network security config ───────────────
 fs.writeFileSync(path.join(resDir, "xml/network_security_config.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
@@ -481,7 +446,7 @@ for (const [dir, size] of Object.entries(iconSizes)) {
 
 if (userIconPath && fs.existsSync(userIconPath)) fs.unlinkSync(userIconPath);
 
-// ─────────────── assets/config.json ───────────────
+// ─── assets/config.json ───
 fs.writeFileSync(path.join(assetsDir, "config.json"),
   JSON.stringify({
     websiteUrl: cfg.websiteUrl,
@@ -492,22 +457,25 @@ fs.writeFileSync(path.join(assetsDir, "config.json"),
     enableMicrophone: cfg.enableMicrophone,
     enableGeolocation: cfg.enableGeolocation,
     orientation: cfg.orientation,
+    hasOffline: hasOffline,
   }, null, 2)
 );
 
 // ═══════════════════════════════════════════════════════════════
-// MainActivity.kt
+// MainActivity.kt (with Hybrid online/offline logic)
 // ═══════════════════════════════════════════════════════════════
-const permsArrayKt = rp.length > 0
-  ? rp.map(p => `"${p}"`).join(", ")
-  : "";
+const permsArrayKt = rp.length > 0 ? rp.map(p => `"${p}"`).join(", ") : "";
+const hasOfflineStr = hasOffline ? "true" : "false";
 
 const mainActivity =
 `package ${cfg.packageName}
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -525,8 +493,11 @@ class MainActivity : AppCompatActivity() {
     private val fileChooserRequestCode = 1001
     private val permissionRequestCode = 2001
 
-    // Runtime permissions requested at first launch (auto-generated from config)
     private val startupPermissions = arrayOf(${permsArrayKt})
+
+    private val HAS_OFFLINE = ${hasOfflineStr}
+    private val LIVE_URL = "${cfg.websiteUrl}"
+    private val OFFLINE_URL = "file:///android_asset/index.html"
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -549,6 +520,8 @@ class MainActivity : AppCompatActivity() {
             databaseEnabled = true
             allowFileAccess = true
             allowContentAccess = true
+            allowFileAccessFromFileURLs = true
+            allowUniversalAccessFromFileURLs = true
             mediaPlaybackRequiresUserGesture = false
             loadWithOverviewMode = true
             useWideViewPort = true
@@ -590,12 +563,10 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // Grant web page requests (camera, mic) automatically
             override fun onPermissionRequest(request: PermissionRequest?) {
                 request?.grant(request.resources)
             }
 
-            // Geolocation from web page
             override fun onGeolocationPermissionsShowPrompt(
                 origin: String?,
                 callback: GeolocationPermissions.Callback?
@@ -614,12 +585,69 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
-        // Request runtime permissions before loading URL
         if (startupPermissions.isNotEmpty()) {
             requestStartupPermissions()
         }
 
-        webView.loadUrl(config.optString("websiteUrl", "https://example.com"))
+        loadBestUrl()
+    }
+
+    private fun isOnline(): Boolean {
+        return try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val n = cm.activeNetwork ?: return false
+                val caps = cm.getNetworkCapabilities(n) ?: return false
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            } else {
+                @Suppress("DEPRECATION")
+                cm.activeNetworkInfo?.isConnected == true
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun loadBestUrl() {
+        val online = isOnline()
+        val url = when {
+            online -> LIVE_URL
+            HAS_OFFLINE -> OFFLINE_URL
+            else -> null
+        }
+
+        if (url != null) {
+            webView.loadUrl(url)
+        } else {
+            webView.loadDataWithBaseURL(
+                null,
+                noInternetHtml(),
+                "text/html",
+                "UTF-8",
+                null
+            )
+        }
+    }
+
+    private fun noInternetHtml(): String {
+        return """
+            <!DOCTYPE html>
+            <html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+            <style>
+              body { font-family: sans-serif; text-align: center; padding: 40px 20px; color: #444; }
+              h1 { font-size: 20px; }
+              p { font-size: 14px; color: #666; }
+              button {
+                margin-top: 20px; padding: 12px 24px; font-size: 15px;
+                background: #1f6feb; color: white; border: none; border-radius: 8px;
+              }
+            </style></head>
+            <body>
+              <h1>📡 No internet connection</h1>
+              <p>Please connect to WiFi or mobile data and try again.</p>
+              <button onclick="location.reload()">Retry</button>
+            </body></html>
+        """.trimIndent()
     }
 
     private fun requestStartupPermissions() {
@@ -637,7 +665,6 @@ class MainActivity : AppCompatActivity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        // Silent — user may grant or deny; WebView handles gracefully
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
@@ -664,7 +691,6 @@ class MainActivity : AppCompatActivity() {
 fs.writeFileSync(path.join(javaDir, "MainActivity.kt"), mainActivity);
 
 console.log("✅ Android project generated at", ROOT);
-console.log("Manifest permissions:", mp.length, "| Runtime permissions:", rp.length);
 
 // ═══════════════════════════════════════════════════════════════
 // HELPERS
