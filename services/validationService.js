@@ -32,7 +32,7 @@ const PERMISSION_KEYS = [
 ];
 
 // ═══════════════════════════════════════════════════════════════
-// MODULES VALIDATION
+// MODULE VALIDATION
 // ═══════════════════════════════════════════════════════════════
 const ALLOWED_MODULE_IDS = /^[a-z0-9][a-z0-9-]{1,40}$/;
 const MAX_MODULES = 10;
@@ -64,13 +64,18 @@ function validateModules(modules) {
     });
   }
 
-  // Ensure exactly one main module
   const mains = validated.filter(m => m.isMain);
   if (validated.length > 0 && mains.length === 0) {
     validated[0].isMain = true;
   }
   if (mains.length > 1) {
-    mains.forEach((m, i) => { if (i > 0) m.isMain = false; });
+    let first = true;
+    validated.forEach(m => {
+      if (m.isMain) {
+        if (first) first = false;
+        else m.isMain = false;
+      }
+    });
   }
 
   return validated;
@@ -98,11 +103,11 @@ function validateConfig(body) {
     "appType"
   );
 
-  // ─── App mode ───
+  // ─── App mode (now includes "native") ───
   const appMode = String(body.appMode || "hybrid");
   assert(
-    ["offline", "online", "hybrid"].includes(appMode),
-    "appMode must be offline|online|hybrid",
+    ["offline", "online", "hybrid", "native"].includes(appMode),
+    "appMode must be offline|online|hybrid|native",
     "appMode"
   );
 
@@ -111,7 +116,8 @@ function validateConfig(body) {
 
   // ─── Website URL ───
   let websiteUrl = String(body.websiteUrl || "").trim();
-  if (appMode === "offline") {
+  if (appMode === "offline" || appMode === "native") {
+    // No real URL needed — placeholder for Firestore
     websiteUrl = websiteUrl || "https://example.com";
   } else {
     assert(websiteUrl.length > 0, "websiteUrl is required", "websiteUrl");
@@ -163,13 +169,22 @@ function validateConfig(body) {
     offlineZipSize = Math.floor((offlineZipBase64.length * 3) / 4);
   }
 
-  // Offline mode REQUIRES ZIP (only for webview app type)
+  // Offline mode REQUIRES ZIP (only for webview app type, NOT native)
   if (appType === "webview" && appMode === "offline") {
     assert(offlineZipBase64, "Offline mode requires an offline ZIP bundle", "offlineZipBase64");
   }
 
-  // ─── Custom modules (admin-only) ───
+  // ─── Custom modules ───
   const modules = validateModules(body.modules || []);
+
+  // ⭐ Native mode REQUIRES at least one custom module
+  if (appMode === "native") {
+    assert(
+      modules.length > 0,
+      "Native mode requires at least one custom module (upload ZIP or write code)",
+      "modules"
+    );
+  }
 
   // ─── Common modules ───
   const commonModules = validateCommonModules(body.commonModules || []);
@@ -191,12 +206,11 @@ function validateConfig(body) {
     offlineZipName,
     offlineZipSize,
     offlineZipBase64,
-    modules,                    // ⭐ Custom modules (kept for controller)
+    modules,
     modulesCount: modules.length,
-    commonModules,              // ⭐ Common module IDs
+    commonModules,
   };
 
-  // Copy all permission flags
   for (const key of PERMISSION_KEYS) {
     config[key] = typeof body[key] === "boolean" ? body[key] : false;
   }
