@@ -6,6 +6,7 @@
  *   - Merges module deps into app/build.gradle
  *   - Merges module manifest fragments into AndroidManifest.xml
  *   - Skips default MainActivity if a module overrides it
+ *   - Generates adaptive icons for Android 8+
  */
 const fs = require("fs");
 const path = require("path");
@@ -34,23 +35,17 @@ let moduleFlags = {
 try {
   const flagsPath = path.join(process.cwd(), "module-flags.json");
   if (fs.existsSync(flagsPath)) {
-    const raw = fs.readFileSync(flagsPath, "utf8");
-    moduleFlags = JSON.parse(raw);
+    moduleFlags = JSON.parse(fs.readFileSync(flagsPath, "utf8"));
     console.log("✓ Loaded module-flags.json");
     console.log("  overrideMainActivity:", moduleFlags.overrideMainActivity);
-    console.log("  modules:", (moduleFlags.modules || []).length);
     console.log("  deps:", (moduleFlags.allDeps || []).length);
     console.log("  root manifest:", (moduleFlags.rootManifest || []).length);
     console.log("  app manifest:", (moduleFlags.appManifest || []).length);
-    if (moduleFlags.allDeps && moduleFlags.allDeps.length > 0) {
-      console.log("  Deps list:");
-      for (const d of moduleFlags.allDeps) console.log("    • " + d);
-    }
   } else {
-    console.log("⚠ No module-flags.json — using defaults");
+    console.log("No module-flags.json — using defaults");
   }
 } catch (e) {
-  console.warn("✗ Failed to read module-flags.json:", e.message);
+  console.warn("Failed to read module-flags.json:", e.message);
 }
 
 const moduleDeps = moduleFlags.allDeps || [];
@@ -60,12 +55,10 @@ const moduleOverridesMainActivity = moduleFlags.overrideMainActivity === true;
 const isNativeMode = cfg.appMode === "native";
 const skipDefaultMainActivity = isNativeMode || moduleOverridesMainActivity;
 
-console.log("───────────────────────────────");
 console.log("appMode:", cfg.appMode);
 console.log("isNativeMode:", isNativeMode);
 console.log("moduleOverridesMainActivity:", moduleOverridesMainActivity);
 console.log("skipDefaultMainActivity:", skipDefaultMainActivity);
-console.log("───────────────────────────────");
 
 // Clean
 fs.rmSync(ROOT, { recursive: true, force: true });
@@ -82,6 +75,7 @@ for (const d of [
   path.join(resDir, "mipmap-xhdpi"),
   path.join(resDir, "mipmap-xxhdpi"),
   path.join(resDir, "mipmap-xxxhdpi"),
+  path.join(resDir, "mipmap-anydpi-v26"),
   assetsDir,
 ]) fs.mkdirSync(d, { recursive: true });
 
@@ -181,6 +175,7 @@ fs.writeFileSync(path.join(ROOT, "build.gradle"),
 }
 `);
 
+// settings.gradle
 fs.writeFileSync(path.join(ROOT, "settings.gradle"),
 `pluginManagement {
   repositories { google(); mavenCentral(); gradlePluginPortal() }
@@ -193,6 +188,7 @@ rootProject.name = "LetsApkBuilder"
 include ':app'
 `);
 
+// gradle.properties
 fs.writeFileSync(path.join(ROOT, "gradle.properties"),
 `org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
 android.useAndroidX=true
@@ -200,11 +196,12 @@ android.nonTransitiveRClass=true
 kotlin.code.style=official
 `);
 
+// local.properties
 const sdkDir = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT || "/usr/local/lib/android/sdk";
 fs.writeFileSync(path.join(ROOT, "local.properties"), `sdk.dir=${sdkDir}\n`);
 
 // ═══════════════════════════════════════════════════════════════
-// app/build.gradle — WITH MODULE DEPS
+// app/build.gradle — with module deps
 // ═══════════════════════════════════════════════════════════════
 const minSdk = 21;
 const targetSdk = 34;
@@ -258,8 +255,6 @@ dependencies {
 
 if (moduleDeps.length > 0) {
   console.log(`✓ Added ${moduleDeps.length} module deps to app/build.gradle`);
-} else {
-  console.log("⚠ No module deps to add");
 }
 
 fs.writeFileSync(path.join(ROOT, "app/proguard-rules.pro"),
@@ -435,7 +430,6 @@ if (skipDefaultMainActivity) {
       </activity>`;
 }
 
-// Dedupe module manifest vs base
 const basePermNames = new Set();
 for (const p of mp) {
   const m = p.match(/android:name="([^"]+)"/);
@@ -486,7 +480,7 @@ ${rootManifestBlock}
       android:allowBackup="true"
       android:icon="@mipmap/ic_launcher"
       android:label="@string/app_name"
-      android:roundIcon="@mipmap/ic_launcher"
+      android:roundIcon="@mipmap/ic_launcher_round"
       android:supportsRtl="true"
       android:usesCleartextTraffic="false"
       android:hardwareAccelerated="true"
@@ -500,8 +494,6 @@ fs.writeFileSync(path.join(ROOT, "app/src/main/AndroidManifest.xml"), manifest);
 
 console.log(`✓ Manifest written`);
 console.log(`  Total permissions: ${mp.length + extraRoot.filter(e => e.startsWith("<uses-permission")).length}`);
-console.log(`  Total features: ${mf.length + extraRoot.filter(e => e.startsWith("<uses-feature")).length}`);
-console.log(`  App-level entries: ${moduleAppManifest.length}`);
 
 if (skipDefaultMainActivity) {
   const manifestContent = fs.readFileSync(path.join(ROOT, "app/src/main/AndroidManifest.xml"), "utf8");
@@ -512,7 +504,9 @@ if (skipDefaultMainActivity) {
   console.log("✓ Launcher activity present");
 }
 
+// ═══════════════════════════════════════════════════════════════
 // Resources
+// ═══════════════════════════════════════════════════════════════
 fs.writeFileSync(path.join(resDir, "values/strings.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <resources>
@@ -525,6 +519,7 @@ fs.writeFileSync(path.join(resDir, "values/colors.xml"),
 <resources>
   <color name="theme_color">${cfg.themeColor}</color>
   <color name="theme_color_dark">${cfg.themeColor}</color>
+  <color name="ic_launcher_background">${cfg.themeColor}</color>
 </resources>
 `);
 
@@ -540,10 +535,17 @@ fs.writeFileSync(path.join(resDir, "values/styles.xml"),
 </resources>
 `);
 
-// Icons
+// ═══════════════════════════════════════════════════════════════
+// ICONS — Adaptive icon support (Android 8+)
+// ═══════════════════════════════════════════════════════════════
 const iconSizes = {
   "mipmap-mdpi": 48, "mipmap-hdpi": 72, "mipmap-xhdpi": 96,
   "mipmap-xxhdpi": 144, "mipmap-xxxhdpi": 192,
+};
+
+const foregroundSizes = {
+  "mipmap-mdpi": 108, "mipmap-hdpi": 162, "mipmap-xhdpi": 216,
+  "mipmap-xxhdpi": 324, "mipmap-xxxhdpi": 432,
 };
 
 let userIconPath = null;
@@ -552,12 +554,14 @@ if (cfg.iconBase64) {
   if (m) {
     userIconPath = path.join(ROOT, ".user-icon.png");
     fs.writeFileSync(userIconPath, Buffer.from(m[1], "base64"));
+    console.log("User icon saved:", fs.statSync(userIconPath).size, "bytes");
   }
 }
 
 let magickOk = false;
 try { execSync("which convert", { stdio: "pipe" }); magickOk = true; } catch { magickOk = false; }
 
+// Main ic_launcher.png (all densities)
 for (const [dir, size] of Object.entries(iconSizes)) {
   const dest = path.join(resDir, dir, "ic_launcher.png");
   let done = false;
@@ -575,9 +579,60 @@ for (const [dir, size] of Object.entries(iconSizes)) {
   if (!done) fs.writeFileSync(dest, generateSolidPng(cfg.themeColor, size));
 }
 
-if (userIconPath && fs.existsSync(userIconPath)) fs.unlinkSync(userIconPath);
+// Round version (same image)
+for (const [dir] of Object.entries(iconSizes)) {
+  const src = path.join(resDir, dir, "ic_launcher.png");
+  const dst = path.join(resDir, dir, "ic_launcher_round.png");
+  fs.copyFileSync(src, dst);
+}
 
-// config.json
+// Foreground layer (larger canvas, icon centered at ~66%)
+for (const [dir, size] of Object.entries(foregroundSizes)) {
+  const dest = path.join(resDir, dir, "ic_launcher_foreground.png");
+  let done = false;
+  if (userIconPath && magickOk) {
+    try {
+      const innerSize = Math.round(size * 0.66);
+      execSync(
+        `convert -size ${size}x${size} xc:none ` +
+        `\\( "${userIconPath}" -resize ${innerSize}x${innerSize} \\) ` +
+        `-gravity center -composite -strip ` +
+        `-define png:color-type=6 -depth 8 PNG32:"${dest}"`,
+        { stdio: "pipe" }
+      );
+      done = true;
+    } catch (e) { console.warn(`Foreground ${dir} failed: ${e.message}`); }
+  }
+  if (!done) fs.writeFileSync(dest, generateSolidPng(cfg.themeColor, size));
+}
+
+// Adaptive icon XML (Android 8+)
+fs.writeFileSync(
+  path.join(resDir, "mipmap-anydpi-v26/ic_launcher.xml"),
+`<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>
+`
+);
+
+fs.writeFileSync(
+  path.join(resDir, "mipmap-anydpi-v26/ic_launcher_round.xml"),
+`<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>
+`
+);
+
+if (userIconPath && fs.existsSync(userIconPath)) fs.unlinkSync(userIconPath);
+console.log("✓ Icons generated (main + round + adaptive foreground)");
+
+// ═══════════════════════════════════════════════════════════════
+// config.json (only for WebView mode)
+// ═══════════════════════════════════════════════════════════════
 if (!isNativeMode) {
   fs.writeFileSync(path.join(assetsDir, "config.json"),
     JSON.stringify({
@@ -595,7 +650,9 @@ if (!isNativeMode) {
   );
 }
 
-// MainActivity
+// ═══════════════════════════════════════════════════════════════
+// MainActivity (only if not skipped)
+// ═══════════════════════════════════════════════════════════════
 const permsArrayKt = rp.length > 0 ? rp.map(p => `"${p}"`).join(", ") : "";
 const hasOfflineStr = hasOffline ? "true" : "false";
 const appMode = cfg.appMode || "hybrid";
@@ -815,16 +872,17 @@ class MainActivity : AppCompatActivity() {
 `;
 
 if (skipDefaultMainActivity) {
-  console.log("⚑ Skipping default MainActivity.kt (native mode or module override)");
+  console.log("⚑ Skipping default MainActivity.kt");
 } else {
   fs.writeFileSync(path.join(javaDir, "MainActivity.kt"), mainActivity);
   console.log("✓ Wrote default WebView MainActivity.kt");
 }
 
 console.log("✅ Android project generated at", ROOT);
-console.log("App mode:", appMode, "| hasOffline:", hasOffline, "| skipMain:", skipDefaultMainActivity);
 
+// ═══════════════════════════════════════════════════════════════
 // HELPERS
+// ═══════════════════════════════════════════════════════════════
 function escapeXml(s) {
   return String(s).replace(/[<>&'"]/g, (c) => ({
     "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;"
