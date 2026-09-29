@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /* Generates a complete Android WebView project from config.json
- * Supports 40+ Android permissions + 3 app modes:
- *   - offline  → always use bundled assets/index.html
- *   - online   → always use live URL
- *   - hybrid   → live URL when online, bundled assets when offline
+ * Supports:
+ *   - 40+ Android permissions (12 categories)
+ *   - 3 app modes: offline | online | hybrid
+ *   - Auto-flatten offline ZIP (finds index.html anywhere in the archive)
+ *   - Robust icon handling (ImageMagick normalize + fallback)
  */
 const fs = require("fs");
 const path = require("path");
@@ -34,9 +35,12 @@ for (const d of [
   assetsDir,
 ]) fs.mkdirSync(d, { recursive: true });
 
-// ─── Offline ZIP extraction ───
+// ═══════════════════════════════════════════════════════════════
+// OFFLINE ZIP — extract + auto-flatten (finds index.html anywhere)
+// ═══════════════════════════════════════════════════════════════
 const offlineZipB64Path = path.join(process.cwd(), "offline.zip.b64");
 let hasOffline = false;
+
 if (fs.existsSync(offlineZipB64Path)) {
   const b64 = fs.readFileSync(offlineZipB64Path, "utf8").trim();
   if (b64) {
@@ -45,10 +49,108 @@ if (fs.existsSync(offlineZipB64Path)) {
       const zipPath = path.join(process.cwd(), "offline.zip");
       fs.writeFileSync(zipPath, zipBuffer);
       console.log("Extracting offline ZIP:", zipBuffer.length, "bytes");
-      execSync(`unzip -q -o "${zipPath}" -d "${assetsDir}"`, { stdio: "inherit" });
+
+      // Extract to a temporary folder
+      const tmpDir = path.join(process.cwd(), "offline-extracted");
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.mkdirSync(tmpDir, { recursive: true });
+
+      execSync(`unzip -q -o "${zipPath}" -d "${tmpDir}"`, { stdio: "inherit" });
       fs.unlinkSync(zipPath);
-      hasOffline = true;
-      console.log("✓ Offline assets extracted to assets/");
+
+      // ── findIndexHtml: recursively locate the folder containing index.html ──
+      function findIndexHtml(dir, depth = 0) {
+        if (depth > 6) return null;
+        let entries;
+        try {
+          entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+          return null;
+        }
+
+        // Check for index.html in this exact directory
+        for (const e of entries) {
+          if (e.isFile() && e.name.toLowerCase() === "index.html") {
+            return dir;
+          }
+        }
+
+        // Recurse into subdirectories (skip __MACOSX and hidden folders)
+        for (const e of entries) {
+          if (
+            e.isDirectory() &&
+            e.name !== "__MACOSX" &&
+            !e.name.startsWith(".")
+          ) {
+            const found = findIndexHtml(path.join(dir, e.name), depth + 1);
+            if (found) return found;
+          }
+        }
+        return null;
+      }
+
+      const indexDir = findIndexHtml(tmpDir);
+
+      if (!indexDir) {
+        console.warn("⚠ No index.html found in ZIP — offline mode will fail");
+      } else {
+        console.log("Found index.html at:", indexDir);
+
+        // Copy everything from indexDir into assetsDir
+        function copyRecursive(src, dest) {
+          const entries = fs.readdirSync(src, { withFileTypes: true });
+          for (const e of entries) {
+            const s = path.join(src, e.name);
+            const d = path.join(dest, e.name);
+            if (e.isDirectory()) {
+              fs.mkdirSync(d, { recursive: true });
+              copyRecursive(s, d);
+            } else {
+              fs.copyFileSync(s, d);
+            }
+          }
+        }
+
+        // Clean assetsDir first
+        fs.rmSync(assetsDir, { recursive: true, force: true });
+        fs.mkdirSync(assetsDir, { recursive: true });
+
+        copyRecursive(indexDir, assetsDir);
+
+        // Remove junk files/dirs
+        function cleanJunk(dir) {
+          if (!fs.existsSync(dir)) return;
+          for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+            const p = path.join(dir, e.name);
+            if (
+              e.name === "__MACOSX" ||
+              e.name === ".DS_Store" ||
+              e.name.startsWith("._")
+            ) {
+              if (e.isDirectory()) fs.rmSync(p, { recursive: true, force: true });
+              else fs.unlinkSync(p);
+            } else if (e.isDirectory()) {
+              cleanJunk(p);
+            }
+          }
+        }
+        cleanJunk(assetsDir);
+
+        // Verify
+        const rootIndex = path.join(assetsDir, "index.html");
+        if (fs.existsSync(rootIndex)) {
+          hasOffline = true;
+          const files = fs.readdirSync(assetsDir);
+          console.log("✓ Offline assets extracted and flattened to assets/");
+          console.log("Assets:", files.join(", "));
+        } else {
+          console.warn("⚠ index.html still not at assets root after flatten");
+        }
+      }
+
+      // Cleanup temp folder
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+
     } catch (e) {
       console.warn("Offline ZIP extraction failed:", e.message);
     }
@@ -56,7 +158,9 @@ if (fs.existsSync(offlineZipB64Path)) {
 }
 console.log("hasOffline:", hasOffline);
 
-// ─────────────── Root build.gradle ───────────────
+// ═══════════════════════════════════════════════════════════════
+// Root build.gradle
+// ═══════════════════════════════════════════════════════════════
 fs.writeFileSync(path.join(ROOT, "build.gradle"),
 `plugins {
   id 'com.android.application' version '8.5.2' apply false
@@ -64,7 +168,9 @@ fs.writeFileSync(path.join(ROOT, "build.gradle"),
 }
 `);
 
-// ─────────────── settings.gradle ───────────────
+// ═══════════════════════════════════════════════════════════════
+// settings.gradle
+// ═══════════════════════════════════════════════════════════════
 fs.writeFileSync(path.join(ROOT, "settings.gradle"),
 `pluginManagement {
   repositories { google(); mavenCentral(); gradlePluginPortal() }
@@ -77,7 +183,9 @@ rootProject.name = "LetsApkBuilder"
 include ':app'
 `);
 
-// ─────────────── gradle.properties ───────────────
+// ═══════════════════════════════════════════════════════════════
+// gradle.properties
+// ═══════════════════════════════════════════════════════════════
 fs.writeFileSync(path.join(ROOT, "gradle.properties"),
 `org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
 android.useAndroidX=true
@@ -85,11 +193,15 @@ android.nonTransitiveRClass=true
 kotlin.code.style=official
 `);
 
-// ─────────────── local.properties ───────────────
+// ═══════════════════════════════════════════════════════════════
+// local.properties
+// ═══════════════════════════════════════════════════════════════
 const sdkDir = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT || "/usr/local/lib/android/sdk";
 fs.writeFileSync(path.join(ROOT, "local.properties"), `sdk.dir=${sdkDir}\n`);
 
-// ─────────────── app/build.gradle ───────────────
+// ═══════════════════════════════════════════════════════════════
+// app/build.gradle
+// ═══════════════════════════════════════════════════════════════
 const minSdk = 21;
 const targetSdk = 34;
 fs.writeFileSync(path.join(ROOT, "app/build.gradle"),
@@ -143,9 +255,9 @@ fs.writeFileSync(path.join(ROOT, "app/proguard-rules.pro"),
 // ═══════════════════════════════════════════════════════════════
 // MANIFEST — build permission & feature list
 // ═══════════════════════════════════════════════════════════════
-const mp = [];
-const mf = [];
-const rp = [];
+const mp = []; // manifest permissions
+const mf = []; // manifest features
+const rp = []; // runtime permissions
 
 mp.push(`<uses-permission android:name="android.permission.INTERNET" />`);
 
@@ -509,13 +621,12 @@ fs.writeFileSync(path.join(assetsDir, "config.json"),
 );
 
 // ═══════════════════════════════════════════════════════════════
-// MainActivity.kt (3-mode routing)
+// MainActivity.kt — 3-mode routing (offline / online / hybrid)
 // ═══════════════════════════════════════════════════════════════
 const permsArrayKt = rp.length > 0 ? rp.map(p => `"${p}"`).join(", ") : "";
 const hasOfflineStr = hasOffline ? "true" : "false";
-
 const appMode = cfg.appMode || "hybrid";
-const appModeStr = JSON.stringify(appMode); // "offline" | "online" | "hybrid"
+const appModeStr = JSON.stringify(appMode);
 
 const mainActivity =
 `package ${cfg.packageName}
@@ -665,15 +776,12 @@ class MainActivity : AppCompatActivity() {
     private fun loadBestUrl() {
         val url: String? = when (APP_MODE) {
             "offline" -> {
-                // Always use bundled content
                 if (HAS_OFFLINE) OFFLINE_URL else null
             }
             "online" -> {
-                // Always use live URL
                 LIVE_URL
             }
             "hybrid" -> {
-                // Online → live; Offline → bundled
                 if (isOnline()) LIVE_URL
                 else if (HAS_OFFLINE) OFFLINE_URL
                 else null
