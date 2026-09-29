@@ -1,12 +1,19 @@
 #!/usr/bin/env node
 /**
- * Fetches custom modules from backend, extracts, validates,
- * replaces placeholders, and installs them into the Android project.
+ * Install custom modules from backend.
  *
- * Also reads `overrideMainActivity` flag from module.json and writes
- * module-flags.json so generate-project.js can skip default MainActivity.
+ * Two modes:
+ *   1. scan mode:    `node install-custom-modules.js <buildId> scan`
+ *      → Fetches module list from backend
+ *      → Extracts module.json from each
+ *      → Writes module-flags.json (used by generate-project.js)
+ *      → Doesn't touch android-project (which doesn't exist yet)
  *
- * Usage: node install-custom-modules.js <buildId>
+ *   2. install mode: `node install-custom-modules.js <buildId>`
+ *      → Requires android-project to exist
+ *      → Extracts full module ZIPs
+ *      → Copies Kotlin, layouts, drawables into project
+ *      → Applies deps.gradle and manifest.xml
  */
 const fs = require("fs");
 const path = require("path");
@@ -14,15 +21,21 @@ const { execSync } = require("child_process");
 const fetch = require("node-fetch");
 
 const BUILD_ID = process.argv[2];
+const MODE = process.argv[3] || "install"; // "scan" or "install"
 const BACKEND_URL = process.env.BACKEND_URL;
 const SECRET = process.env.WEBHOOK_SECRET;
+const PROJECT_ROOT = "android-project";
 
 if (!BUILD_ID || !BACKEND_URL || !SECRET) {
   console.error("Missing BUILD_ID, BACKEND_URL or WEBHOOK_SECRET");
   process.exit(1);
 }
 
-// Find java source directory
+console.log(`>>> install-custom-modules.js — mode: ${MODE}`);
+
+// ═══════════════════════════════════════════════════════════════
+// Helpers
+// ═══════════════════════════════════════════════════════════════
 function findJavaDir(root) {
   const base = path.join(root, "app/src/main/java");
   if (!fs.existsSync(base)) return null;
@@ -37,19 +50,100 @@ function findJavaDir(root) {
   return dirs.length > 0 ? dirs[dirs.length - 1] : base;
 }
 
-const PROJECT_ROOT = process.argv[3] || "android-project";
-const javaDir = findJavaDir(PROJECT_ROOT);
-const resDir = path.join(PROJECT_ROOT, "app/src/main/res");
-const assetsDir = path.join(PROJECT_ROOT, "app/src/main/assets");
-
-if (!javaDir) {
-  console.error("Could not find java directory");
-  process.exit(1);
+async function fetchModuleList() {
+  const url = `${BACKEND_URL}/api/internal/modules/${BUILD_ID}`;
+  const res = await fetch(url, { headers: { "X-Internal-Secret": SECRET } });
+  if (!res.ok) return [];
+  const { modules } = await res.json();
+  return modules || [];
 }
-console.log("Java dir:", javaDir);
+
+async function fetchModuleZip(moduleId) {
+  const url = `${BACKEND_URL}/api/internal/module/${BUILD_ID}/${moduleId}`;
+  const res = await fetch(url, { headers: { "X-Internal-Secret": SECRET } });
+  if (!res.ok) return null;
+  return res.json(); // { base64, name, size }
+}
+
+function extractZip(base64, destDir) {
+  fs.mkdirSync(destDir, { recursive: true });
+  const zipPath = path.join(destDir, "module.zip");
+  fs.writeFileSync(zipPath, Buffer.from(base64, "base64"));
+  execSync(`unzip -q -o "${zipPath}" -d "${destDir}/x"`, { stdio: "inherit" });
+  fs.unlinkSync(zipPath);
+
+  // Flatten if single wrapper folder
+  let srcDir = path.join(destDir, "x");
+  const entries = fs.readdirSync(srcDir);
+  if (entries.length === 1 && fs.statSync(path.join(srcDir, entries[0])).isDirectory()) {
+    srcDir = path.join(srcDir, entries[0]);
+  }
+  return srcDir;
+}
 
 // ═══════════════════════════════════════════════════════════════
-// Security scan
+// SCAN PHASE
+// ═══════════════════════════════════════════════════════════════
+async function runScan() {
+  console.log("Mode: scan — will write module-flags.json only");
+
+  const modules = await fetchModuleList();
+  if (modules.length === 0) {
+    console.log("No custom modules for this build");
+    return;
+  }
+
+  console.log(`Found ${modules.length} module(s): ${modules.map(m => m.id).join(", ")}`);
+
+  const flags = {
+    overrideMainActivity: false,
+    modules: [],
+  };
+
+  for (const mod of modules) {
+    try {
+      const data = await fetchModuleZip(mod.id);
+      if (!data) continue;
+
+      const tmpDir = path.join(process.cwd(), `.scan-${mod.id}`);
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      const srcDir = extractZip(data.base64, tmpDir);
+
+      const metaPath = path.join(srcDir, "module.json");
+      if (!fs.existsSync(metaPath)) {
+        console.warn(`  ✗ ${mod.id}: no module.json`);
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+        continue;
+      }
+
+      const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+      console.log(`  ✓ ${meta.name} v${meta.version}`);
+
+      flags.modules.push({
+        id: mod.id,
+        name: meta.name,
+        version: meta.version,
+        overrideMainActivity: meta.overrideMainActivity === true,
+      });
+
+      if (meta.overrideMainActivity === true) {
+        flags.overrideMainActivity = true;
+        console.log(`  ⚑ "${meta.name}" overrides MainActivity`);
+      }
+
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch (e) {
+      console.warn(`  ✗ Scan ${mod.id} failed:`, e.message);
+    }
+  }
+
+  fs.writeFileSync("module-flags.json", JSON.stringify(flags, null, 2));
+  console.log("✓ Wrote module-flags.json");
+  console.log("  overrideMainActivity:", flags.overrideMainActivity);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// INSTALL PHASE
 // ═══════════════════════════════════════════════════════════════
 const FORBIDDEN = [
   /Runtime\.getRuntime\(\)\.exec/,
@@ -59,7 +153,7 @@ const FORBIDDEN = [
   /\.deleteRecursively\(\)/,
 ];
 
-function scan(content, file) {
+function scanForThreats(content, file) {
   for (const p of FORBIDDEN) {
     if (p.test(content)) {
       throw new Error(`Forbidden pattern in ${file}: ${p}`);
@@ -67,86 +161,55 @@ function scan(content, file) {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Install one module
-// ═══════════════════════════════════════════════════════════════
-async function installModule(moduleId, cfg) {
-  console.log(`\n→ Installing module: ${moduleId}`);
+async function installModuleIntoProject(modId, cfg, javaDir, resDir, assetsDir) {
+  console.log(`\n→ Installing: ${modId}`);
 
-  const url = `${BACKEND_URL}/api/internal/module/${BUILD_ID}/${moduleId}`;
-  const res = await fetch(url, { headers: { "X-Internal-Secret": SECRET } });
-  if (!res.ok) {
-    console.error(`  ✗ Fetch failed: ${res.status}`);
+  const data = await fetchModuleZip(modId);
+  if (!data) {
+    console.error(`  ✗ Fetch failed`);
     return null;
   }
+  console.log(`  ✓ Fetched: ${data.name} (${Math.round(data.size / 1024)} KB)`);
 
-  const { base64, name, size } = await res.json();
-  console.log(`  ✓ Fetched: ${name} (${Math.round(size / 1024)} KB)`);
-
-  const tmpDir = path.join(process.cwd(), `.mod-${moduleId}`);
+  const tmpDir = path.join(process.cwd(), `.install-${modId}`);
   fs.rmSync(tmpDir, { recursive: true, force: true });
-  fs.mkdirSync(tmpDir, { recursive: true });
+  const srcDir = extractZip(data.base64, tmpDir);
 
-  const zipPath = path.join(tmpDir, "module.zip");
-  fs.writeFileSync(zipPath, Buffer.from(base64, "base64"));
-  execSync(`unzip -q -o "${zipPath}" -d "${tmpDir}/x"`, { stdio: "inherit" });
-
-  let srcDir = path.join(tmpDir, "x");
-  const entries = fs.readdirSync(srcDir);
-  if (entries.length === 1 && fs.statSync(path.join(srcDir, entries[0])).isDirectory()) {
-    srcDir = path.join(srcDir, entries[0]);
-  }
-
-  // Validate module.json
   const metaPath = path.join(srcDir, "module.json");
   if (!fs.existsSync(metaPath)) {
-    console.error("  ✗ Missing module.json");
+    console.error(`  ✗ Missing module.json`);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
     return null;
   }
   const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
   console.log(`  ✓ Module: ${meta.name} v${meta.version}`);
 
-  // ⭐ Write override flag if declared
-  if (meta.overrideMainActivity === true) {
-    const flagsPath = path.join(process.cwd(), "module-flags.json");
-    let flags = {};
-    if (fs.existsSync(flagsPath)) {
-      try { flags = JSON.parse(fs.readFileSync(flagsPath, "utf8")); }
-      catch { flags = {}; }
-    }
-    flags.overrideMainActivity = true;
-    flags.moduleName = meta.name;
-    fs.writeFileSync(flagsPath, JSON.stringify(flags, null, 2));
-    console.log(`  ⚑ Module "${meta.name}" overrides MainActivity`);
-  }
-
-  // Install Kotlin files
-  const ktFiles = fs.readdirSync(srcDir).filter(f => f.endsWith(".kt"));
-  for (const f of ktFiles) {
+  // Kotlin files
+  for (const f of fs.readdirSync(srcDir).filter(f => f.endsWith(".kt"))) {
     let content = fs.readFileSync(path.join(srcDir, f), "utf8");
-    scan(content, f);
+    scanForThreats(content, f);
     content = content
       .replace(/{PACKAGE_NAME}/g, cfg.packageName)
       .replace(/{APP_NAME}/g, cfg.appName)
       .replace(/{THEME_COLOR}/g, cfg.themeColor);
     fs.writeFileSync(path.join(javaDir, f), content);
-    console.log(`  ✓ Installed: ${f}`);
+    console.log(`  ✓ Kotlin: ${f}`);
   }
 
-  // Layout files
+  // Layouts
   const layoutSrc = path.join(srcDir, "layout");
   if (fs.existsSync(layoutSrc)) {
     const layoutDest = path.join(resDir, "layout");
     fs.mkdirSync(layoutDest, { recursive: true });
     for (const f of fs.readdirSync(layoutSrc)) {
-      let content = fs.readFileSync(path.join(layoutSrc, f), "utf8");
-      content = content.replace(/{PACKAGE_NAME}/g, cfg.packageName);
-      fs.writeFileSync(path.join(layoutDest, f), content);
+      let c = fs.readFileSync(path.join(layoutSrc, f), "utf8");
+      c = c.replace(/{PACKAGE_NAME}/g, cfg.packageName);
+      fs.writeFileSync(path.join(layoutDest, f), c);
     }
-    console.log(`  ✓ Layouts installed`);
+    console.log(`  ✓ Layouts`);
   }
 
-  // Drawable files
+  // Drawables
   const drawableSrc = path.join(srcDir, "drawable");
   if (fs.existsSync(drawableSrc)) {
     const drawableDest = path.join(resDir, "drawable");
@@ -154,24 +217,23 @@ async function installModule(moduleId, cfg) {
     for (const f of fs.readdirSync(drawableSrc)) {
       fs.copyFileSync(path.join(drawableSrc, f), path.join(drawableDest, f));
     }
-    console.log(`  ✓ Drawables installed`);
+    console.log(`  ✓ Drawables`);
   }
 
-  // Values files (strings.xml, colors.xml, etc.)
+  // Values
   const valuesSrc = path.join(srcDir, "values");
   if (fs.existsSync(valuesSrc)) {
     const valuesDest = path.join(resDir, "values");
     fs.mkdirSync(valuesDest, { recursive: true });
     for (const f of fs.readdirSync(valuesSrc)) {
-      let content = fs.readFileSync(path.join(valuesSrc, f), "utf8");
-      content = content.replace(/{PACKAGE_NAME}/g, cfg.packageName);
-      // Merge with existing? For now just write (may override)
-      fs.writeFileSync(path.join(valuesDest, f), content);
+      let c = fs.readFileSync(path.join(valuesSrc, f), "utf8");
+      c = c.replace(/{PACKAGE_NAME}/g, cfg.packageName);
+      fs.writeFileSync(path.join(valuesDest, f), c);
     }
-    console.log(`  ✓ Values installed`);
+    console.log(`  ✓ Values`);
   }
 
-  // assets/ files
+  // Assets
   const assetsSrc = path.join(srcDir, "assets");
   if (fs.existsSync(assetsSrc)) {
     fs.mkdirSync(assetsDir, { recursive: true });
@@ -184,18 +246,17 @@ async function installModule(moduleId, cfg) {
         fs.copyFileSync(s, d);
       }
     }
-    console.log(`  ✓ Assets installed`);
+    console.log(`  ✓ Assets`);
   }
 
-  // Collect dependencies
+  // Deps
   let deps = [];
   const depsFile = path.join(srcDir, "deps.gradle");
   if (fs.existsSync(depsFile)) {
     deps = fs.readFileSync(depsFile, "utf8")
-      .split("\n")
-      .map(l => l.trim())
+      .split("\n").map(l => l.trim())
       .filter(l => l && !l.startsWith("//"));
-    console.log(`  ✓ Found ${deps.length} dependencies`);
+    console.log(`  ✓ ${deps.length} deps`);
   }
 
   // Manifest fragment
@@ -204,53 +265,83 @@ async function installModule(moduleId, cfg) {
   if (fs.existsSync(manifestFile)) {
     manifest = fs.readFileSync(manifestFile, "utf8")
       .replace(/{PACKAGE_NAME}/g, cfg.packageName);
-    console.log(`  ✓ Manifest fragment: ${manifest.length} chars`);
+    console.log(`  ✓ Manifest fragment`);
   }
 
-  // Cleanup
   fs.rmSync(tmpDir, { recursive: true, force: true });
-
   return { deps, manifest };
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Apply deps + manifest fragments to project
-// ═══════════════════════════════════════════════════════════════
 function applyDepsToGradle(allDeps) {
   if (allDeps.length === 0) return;
-
   const gradlePath = path.join(PROJECT_ROOT, "app/build.gradle");
   let content = fs.readFileSync(gradlePath, "utf8");
-
   const depsBlock = allDeps.map(d => `  ${d}`).join("\n");
   const marker = "dependencies {";
-
   if (content.includes(marker)) {
     content = content.replace(
       marker,
-      `${marker}\n  // ─── Module dependencies ───\n${depsBlock}\n`
+      `${marker}\n  // ─── Module deps ───\n${depsBlock}\n`
     );
     fs.writeFileSync(gradlePath, content);
-    console.log(`✓ Applied ${allDeps.length} deps to app/build.gradle`);
+    console.log(`✓ Applied ${allDeps.length} deps`);
   }
 }
 
 function applyManifestFragments(fragments) {
   if (fragments.length === 0) return;
-
   const manifestPath = path.join(PROJECT_ROOT, "app/src/main/AndroidManifest.xml");
   let content = fs.readFileSync(manifestPath, "utf8");
-
   const combined = fragments.join("\n  ");
-
-  // Insert before </application>
   content = content.replace(
     "</application>",
     `\n  ${combined}\n  </application>`
   );
-
   fs.writeFileSync(manifestPath, content);
   console.log(`✓ Applied ${fragments.length} manifest fragments`);
+}
+
+async function runInstall() {
+  console.log("Mode: install — will extract & copy into android-project");
+
+  if (!fs.existsSync(PROJECT_ROOT)) {
+    console.error(`✗ ${PROJECT_ROOT} not found. Run generate-project.js first.`);
+    process.exit(1);
+  }
+
+  const javaDir = findJavaDir(PROJECT_ROOT);
+  if (!javaDir) {
+    console.error("✗ Could not find java directory in project");
+    process.exit(1);
+  }
+  console.log("Java dir:", javaDir);
+
+  const resDir = path.join(PROJECT_ROOT, "app/src/main/res");
+  const assetsDir = path.join(PROJECT_ROOT, "app/src/main/assets");
+
+  const modules = await fetchModuleList();
+  if (modules.length === 0) {
+    console.log("No custom modules to install");
+    return;
+  }
+
+  const cfg = JSON.parse(fs.readFileSync("config.json", "utf8"));
+
+  const allDeps = new Set();
+  const allManifests = [];
+
+  for (const mod of modules) {
+    const result = await installModuleIntoProject(mod.id, cfg, javaDir, resDir, assetsDir);
+    if (result) {
+      result.deps.forEach(d => allDeps.add(d));
+      if (result.manifest) allManifests.push(result.manifest);
+    }
+  }
+
+  applyDepsToGradle(Array.from(allDeps));
+  applyManifestFragments(allManifests);
+
+  console.log(`\n✅ Installed ${modules.length} module(s)`);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -258,41 +349,13 @@ function applyManifestFragments(fragments) {
 // ═══════════════════════════════════════════════════════════════
 (async () => {
   try {
-    const listRes = await fetch(
-      `${BACKEND_URL}/api/internal/modules/${BUILD_ID}`,
-      { headers: { "X-Internal-Secret": SECRET } }
-    );
-    if (!listRes.ok) {
-      console.log("No custom modules for this build");
-      return;
+    if (MODE === "scan") {
+      await runScan();
+    } else {
+      await runInstall();
     }
-    const { modules } = await listRes.json();
-    if (!modules || modules.length === 0) {
-      console.log("No custom modules for this build");
-      return;
-    }
-
-    const cfg = JSON.parse(fs.readFileSync("config.json", "utf8"));
-
-    const allDeps = new Set();
-    const allManifests = [];
-
-    for (const mod of modules) {
-      const result = await installModule(mod.id, cfg);
-      if (result) {
-        result.deps.forEach(d => allDeps.add(d));
-        if (result.manifest) allManifests.push(result.manifest);
-      }
-    }
-
-    // Apply deps + manifest
-    applyDepsToGradle(Array.from(allDeps));
-    applyManifestFragments(allManifests);
-
-    console.log(`\n✅ Installed ${modules.length} custom module(s)`);
-    console.log(`   Deps: ${allDeps.size} | Manifest fragments: ${allManifests.length}`);
   } catch (err) {
-    console.error("Install failed:", err.message);
+    console.error("Failed:", err.message);
     process.exit(1);
   }
 })();
