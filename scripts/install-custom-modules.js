@@ -1,10 +1,7 @@
 #!/usr/bin/env node
 /**
  * Install custom modules from backend.
- *
- * Two modes:
- *   1. scan mode:    `node install-custom-modules.js <buildId> scan`
- *   2. install mode: `node install-custom-modules.js <buildId>`
+ * Two modes: scan | install
  */
 const fs = require("fs");
 const path = require("path");
@@ -24,9 +21,6 @@ if (!BUILD_ID || !BACKEND_URL || !SECRET) {
 
 console.log(`>>> install-custom-modules.js — mode: ${MODE}`);
 
-// ═══════════════════════════════════════════════════════════════
-// Helpers
-// ═══════════════════════════════════════════════════════════════
 function findJavaDir(root) {
   const base = path.join(root, "app/src/main/java");
   if (!fs.existsSync(base)) return null;
@@ -62,7 +56,6 @@ function extractZip(base64, destDir) {
   fs.writeFileSync(zipPath, Buffer.from(base64, "base64"));
   execSync(`unzip -q -o "${zipPath}" -d "${destDir}/x"`, { stdio: "inherit" });
   fs.unlinkSync(zipPath);
-
   let srcDir = path.join(destDir, "x");
   const entries = fs.readdirSync(srcDir);
   if (entries.length === 1 && fs.statSync(path.join(srcDir, entries[0])).isDirectory()) {
@@ -72,20 +65,34 @@ function extractZip(base64, destDir) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SCAN PHASE
+// SCAN MODE — collect metadata only
 // ═══════════════════════════════════════════════════════════════
 async function runScan() {
-  console.log("Mode: scan — will write module-flags.json only");
+  console.log("Mode: scan — collecting metadata");
 
   const modules = await fetchModuleList();
   if (modules.length === 0) {
     console.log("No custom modules for this build");
+    fs.writeFileSync("module-flags.json", JSON.stringify({
+      overrideMainActivity: false, modules: [],
+      allDeps: [], rootManifest: [], appManifest: []
+    }));
     return;
   }
 
-  console.log(`Found ${modules.length} module(s): ${modules.map(m => m.id).join(", ")}`);
+  console.log(`Found ${modules.length} module(s)`);
 
-  const flags = { overrideMainActivity: false, modules: [] };
+  const flags = {
+    overrideMainActivity: false,
+    modules: [],
+    allDeps: [],
+    rootManifest: [],   // uses-permission, uses-feature
+    appManifest: [],    // activity, service, receiver, provider
+  };
+
+  const seenPerms = new Set();
+  const seenFeats = new Set();
+  const seenDeps = new Set();
 
   for (const mod of modules) {
     try {
@@ -116,6 +123,49 @@ async function runScan() {
         console.log(`  ⚑ "${meta.name}" overrides MainActivity`);
       }
 
+      // Read deps.gradle
+      const depsFile = path.join(srcDir, "deps.gradle");
+      if (fs.existsSync(depsFile)) {
+        const deps = fs.readFileSync(depsFile, "utf8")
+          .split("\n").map(l => l.trim())
+          .filter(l => l && !l.startsWith("//"));
+        for (const d of deps) {
+          if (!seenDeps.has(d)) { seenDeps.add(d); flags.allDeps.push(d); }
+        }
+        console.log(`  ✓ ${deps.length} deps`);
+      }
+
+      // Read manifest.xml
+      const manifestFile = path.join(srcDir, "manifest.xml");
+      if (fs.existsSync(manifestFile)) {
+        let content = fs.readFileSync(manifestFile, "utf8")
+          .replace(/{PACKAGE_NAME}/g, meta.packageName || "PLACEHOLDER");
+
+        // Extract root-level (uses-permission, uses-feature)
+        const rootRegex = /<(uses-permission|uses-feature)\b[^>]*\/>/g;
+        let m;
+        while ((m = rootRegex.exec(content)) !== null) {
+          const elem = m[0].trim();
+          const nameM = elem.match(/android:name="([^"]+)"/);
+          if (nameM) {
+            const key = `${m[1]}:${nameM[1]}`;
+            if (m[1] === "uses-permission" && seenPerms.has(nameM[1])) continue;
+            if (m[1] === "uses-feature" && seenFeats.has(nameM[1])) continue;
+            if (m[1] === "uses-permission") seenPerms.add(nameM[1]);
+            if (m[1] === "uses-feature") seenFeats.add(nameM[1]);
+          }
+          flags.rootManifest.push(elem);
+        }
+
+        // Extract app-level (activity, service, receiver, provider)
+        const appRegex = /<(activity|service|receiver|provider)\b[\s\S]*?<\/\1>|<(activity|service|receiver|provider)\b[^>]*\/>/g;
+        while ((m = appRegex.exec(content)) !== null) {
+          flags.appManifest.push(m[0].trim());
+        }
+
+        console.log(`  ✓ Manifest: ${flags.rootManifest.length} root + ${flags.appManifest.length} app entries`);
+      }
+
       fs.rmSync(tmpDir, { recursive: true, force: true });
     } catch (e) {
       console.warn(`  ✗ Scan ${mod.id} failed:`, e.message);
@@ -123,17 +173,19 @@ async function runScan() {
   }
 
   fs.writeFileSync("module-flags.json", JSON.stringify(flags, null, 2));
-  console.log("✓ Wrote module-flags.json");
+  console.log(`✓ Wrote module-flags.json`);
+  console.log(`  overrideMainActivity: ${flags.overrideMainActivity}`);
+  console.log(`  deps: ${flags.allDeps.length}`);
+  console.log(`  root manifest: ${flags.rootManifest.length}`);
+  console.log(`  app manifest: ${flags.appManifest.length}`);
 }
 
 // ═══════════════════════════════════════════════════════════════
-// INSTALL PHASE
+// INSTALL MODE — copy Kotlin / res files only
 // ═══════════════════════════════════════════════════════════════
 const FORBIDDEN = [
   /Runtime\.getRuntime\(\)\.exec/,
-  /ProcessBuilder/,
-  /System\.exit/,
-  /System\.getenv\(/,
+  /ProcessBuilder/, /System\.exit/, /System\.getenv\(/,
   /\.deleteRecursively\(\)/,
 ];
 
@@ -143,30 +195,17 @@ function scanForThreats(content, file) {
   }
 }
 
-async function installModuleIntoProject(modId, cfg, javaDir, resDir, assetsDir) {
-  console.log(`\n→ Installing: ${modId}`);
+async function installModuleFiles(modId, cfg, javaDir, resDir, assetsDir) {
+  console.log(`\n→ Installing files from: ${modId}`);
 
   const data = await fetchModuleZip(modId);
-  if (!data) {
-    console.error(`  ✗ Fetch failed`);
-    return null;
-  }
-  console.log(`  ✓ Fetched: ${data.name} (${Math.round(data.size / 1024)} KB)`);
+  if (!data) { console.error(`  ✗ Fetch failed`); return false; }
 
   const tmpDir = path.join(process.cwd(), `.install-${modId}`);
   fs.rmSync(tmpDir, { recursive: true, force: true });
   const srcDir = extractZip(data.base64, tmpDir);
 
-  const metaPath = path.join(srcDir, "module.json");
-  if (!fs.existsSync(metaPath)) {
-    console.error(`  ✗ Missing module.json`);
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-    return null;
-  }
-  const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
-  console.log(`  ✓ Module: ${meta.name} v${meta.version}`);
-
-  // Kotlin files
+  // Kotlin
   for (const f of fs.readdirSync(srcDir).filter(f => f.endsWith(".kt"))) {
     let content = fs.readFileSync(path.join(srcDir, f), "utf8");
     scanForThreats(content, f);
@@ -222,218 +261,47 @@ async function installModuleIntoProject(modId, cfg, javaDir, resDir, assetsDir) 
     for (const f of fs.readdirSync(assetsSrc)) {
       const s = path.join(assetsSrc, f);
       const d = path.join(assetsDir, f);
-      if (fs.statSync(s).isDirectory()) {
-        execSync(`cp -r "${s}" "${d}"`);
-      } else {
-        fs.copyFileSync(s, d);
-      }
+      if (fs.statSync(s).isDirectory()) execSync(`cp -r "${s}" "${d}"`);
+      else fs.copyFileSync(s, d);
     }
     console.log(`  ✓ Assets`);
   }
 
-  // Deps
-  let deps = [];
-  const depsFile = path.join(srcDir, "deps.gradle");
-  if (fs.existsSync(depsFile)) {
-    deps = fs.readFileSync(depsFile, "utf8")
-      .split("\n").map(l => l.trim())
-      .filter(l => l && !l.startsWith("//"));
-    console.log(`  ✓ ${deps.length} deps`);
-  }
-
-  // Manifest fragment
-  let manifest = "";
-  const manifestFile = path.join(srcDir, "manifest.xml");
-  if (fs.existsSync(manifestFile)) {
-    manifest = fs.readFileSync(manifestFile, "utf8")
-      .replace(/{PACKAGE_NAME}/g, cfg.packageName);
-    console.log(`  ✓ Manifest fragment`);
-  }
-
   fs.rmSync(tmpDir, { recursive: true, force: true });
-  return { deps, manifest };
-}
-
-function applyDepsToGradle(allDeps) {
-  if (allDeps.length === 0) return;
-  const gradlePath = path.join(PROJECT_ROOT, "app/build.gradle");
-  let content = fs.readFileSync(gradlePath, "utf8");
-  const depsBlock = allDeps.map(d => `  ${d}`).join("\n");
-  const marker = "dependencies {";
-  if (content.includes(marker)) {
-    content = content.replace(
-      marker,
-      `${marker}\n  // ─── Module deps ───\n${depsBlock}\n`
-    );
-    fs.writeFileSync(gradlePath, content);
-    console.log(`✓ Applied ${allDeps.length} deps`);
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// ⭐ FIXED: Manifest merge with dedupe + tools:node="merge"
-// ═══════════════════════════════════════════════════════════════
-function applyManifestFragments(fragments) {
-  if (fragments.length === 0) return;
-
-  const manifestPath = path.join(PROJECT_ROOT, "app/src/main/AndroidManifest.xml");
-  let content = fs.readFileSync(manifestPath, "utf8");
-
-  // ─── Ensure xmlns:tools declared ───
-  if (!content.includes("xmlns:tools=")) {
-    content = content.replace(
-      /<manifest\s+([^>]*?)>/,
-      `<manifest $1 xmlns:tools="http://schemas.android.com/tools">`
-    );
-  }
-
-  // ─── Extract existing permissions & features to dedupe ───
-  const existingPermissions = new Set();
-  const existingFeatures = new Set();
-
-  let m;
-  const permRegex = /<uses-permission\s+[^>]*android:name="([^"]+)"/g;
-  while ((m = permRegex.exec(content)) !== null) existingPermissions.add(m[1]);
-
-  const featRegex = /<uses-feature\s+[^>]*android:name="([^"]+)"/g;
-  while ((m = featRegex.exec(content)) !== null) existingFeatures.add(m[1]);
-
-  const rootLevel = [];
-  const appLevel = [];
-
-  for (const fragment of fragments) {
-    // ─── Root-level: uses-permission, uses-feature ───
-    const rootTagRegex = /<(uses-permission|uses-feature)\b[^>]*\/>/g;
-    while ((m = rootTagRegex.exec(fragment)) !== null) {
-      const elem = m[0].trim();
-      const tag = m[1];
-      const nameMatch = elem.match(/android:name="([^"]+)"/);
-      if (nameMatch) {
-        const name = nameMatch[1];
-        if (tag === "uses-permission" && existingPermissions.has(name)) {
-          console.log(`  ⊘ Skip duplicate permission: ${name}`);
-          continue;
-        }
-        if (tag === "uses-feature" && existingFeatures.has(name)) {
-          console.log(`  ⊘ Skip duplicate feature: ${name}`);
-          continue;
-        }
-        // Mark as added to avoid duplicates within fragments too
-        if (tag === "uses-permission") existingPermissions.add(name);
-        if (tag === "uses-feature") existingFeatures.add(name);
-      }
-      // Add tools:node="merge" to be safe
-      const merged = elem.replace(
-        /<uses-(permission|feature)/,
-        `<uses-$1 tools:node="merge"`
-      );
-      rootLevel.push(merged);
-    }
-
-    // ─── App-level: activity, service, receiver, provider ───
-    const appTagRegex = /<(activity|service|receiver|provider)\b[\s\S]*?<\/\1>|<(activity|service|receiver|provider)\b[^>]*\/>/g;
-    while ((m = appTagRegex.exec(fragment)) !== null) {
-      const elem = m[0].trim();
-      const merged = elem.replace(
-        /<(activity|service|receiver|provider)/,
-        `<$1 tools:node="merge"`
-      );
-      appLevel.push(merged);
-    }
-  }
-
-  // ─── Insert root-level elements right before <application ───
-  if (rootLevel.length > 0) {
-    content = content.replace(
-      /(\s*<application\b)/,
-      "\n  " + rootLevel.join("\n  ") + "\n$1"
-    );
-    console.log(`✓ Inserted ${rootLevel.length} root-level entries (permissions/features)`);
-  }
-
-  // ─── Insert app-level elements right before </application> ───
-  if (appLevel.length > 0) {
-    content = content.replace(
-      /(\s*<\/application>)/,
-      "\n  " + appLevel.join("\n  ") + "\n$1"
-    );
-    console.log(`✓ Inserted ${appLevel.length} app-level entries (activities/services)`);
-  }
-
-  fs.writeFileSync(manifestPath, content);
-
-  // ─── Verify LAUNCHER if native mode ───
-  const flagsPath = path.join(process.cwd(), "module-flags.json");
-  if (fs.existsSync(flagsPath)) {
-    try {
-      const flags = JSON.parse(fs.readFileSync(flagsPath, "utf8"));
-      if (flags.overrideMainActivity) {
-        const finalManifest = fs.readFileSync(manifestPath, "utf8");
-        if (!finalManifest.includes("android.intent.category.LAUNCHER")) {
-          console.error("❌ Native mode but NO LAUNCHER activity in manifest!");
-          process.exit(1);
-        }
-        console.log("✓ Launcher activity present");
-      }
-    } catch (e) {
-      console.warn("Could not verify launcher:", e.message);
-    }
-  }
+  return true;
 }
 
 async function runInstall() {
-  console.log("Mode: install — will extract & copy into android-project");
+  console.log("Mode: install — copying files");
 
   if (!fs.existsSync(PROJECT_ROOT)) {
-    console.error(`✗ ${PROJECT_ROOT} not found. Run generate-project.js first.`);
+    console.error(`✗ ${PROJECT_ROOT} not found`);
     process.exit(1);
   }
 
   const javaDir = findJavaDir(PROJECT_ROOT);
-  if (!javaDir) {
-    console.error("✗ Could not find java directory in project");
-    process.exit(1);
-  }
+  if (!javaDir) { console.error("✗ Java dir not found"); process.exit(1); }
   console.log("Java dir:", javaDir);
 
   const resDir = path.join(PROJECT_ROOT, "app/src/main/res");
   const assetsDir = path.join(PROJECT_ROOT, "app/src/main/assets");
 
   const modules = await fetchModuleList();
-  if (modules.length === 0) {
-    console.log("No custom modules to install");
-    return;
-  }
+  if (modules.length === 0) { console.log("No modules to install"); return; }
 
   const cfg = JSON.parse(fs.readFileSync("config.json", "utf8"));
 
-  const allDeps = new Set();
-  const allManifests = [];
-
   for (const mod of modules) {
-    const result = await installModuleIntoProject(mod.id, cfg, javaDir, resDir, assetsDir);
-    if (result) {
-      result.deps.forEach(d => allDeps.add(d));
-      if (result.manifest) allManifests.push(result.manifest);
-    }
+    await installModuleFiles(mod.id, cfg, javaDir, resDir, assetsDir);
   }
 
-  applyDepsToGradle(Array.from(allDeps));
-  applyManifestFragments(allManifests);
-
-  console.log(`\n✅ Installed ${modules.length} module(s)`);
+  console.log(`\n✅ Installed ${modules.length} module file(s)`);
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Main
-// ═══════════════════════════════════════════════════════════════
 (async () => {
   try {
-    if (MODE === "scan") {
-      await runScan();
-    } else {
-      await runInstall();
-    }
+    if (MODE === "scan") await runScan();
+    else await runInstall();
   } catch (err) {
     console.error("Failed:", err.message);
     process.exit(1);
