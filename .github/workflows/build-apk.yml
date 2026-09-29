@@ -97,6 +97,19 @@ jobs:
           STEP_INDEX: "3"
         run: node scripts/notify-step.js
 
+      # ⭐ Reset module flags before installing modules
+      - name: Reset module flags
+        run: rm -f module-flags.json || true
+
+      - name: Install custom modules
+        env:
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: |
+          npm install --no-save node-fetch@2
+          node scripts/install-custom-modules.js "$BUILD_ID"
+
       - name: Generate Android project
         run: node scripts/generate-project.js config.json
 
