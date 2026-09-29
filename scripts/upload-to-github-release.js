@@ -1,11 +1,17 @@
 #!/usr/bin/env node
 const fs = require("fs");
+const path = require("path");
 
 const apkPath = process.argv[2];
 const buildId = process.argv[3];
 
 if (!apkPath || !buildId) {
   console.error("Usage: upload-to-github-release.js <apkPath> <buildId>");
+  process.exit(1);
+}
+
+if (!fs.existsSync(apkPath)) {
+  console.error(`APK file not found: ${apkPath}`);
   process.exit(1);
 }
 
@@ -18,11 +24,15 @@ if (!token || !repo) {
   process.exit(1);
 }
 
+// ⭐ Use actual filename (from workflow's rename step)
+const assetName = path.basename(apkPath);
+console.log("Asset name:", assetName);
+
 const tag = `build-${buildId}`;
-const assetName = "app-release.apk";
 const releaseName = `Build ${buildId.slice(0, 8)}`;
 
 (async () => {
+  // 1. Create release
   const createRes = await fetch(`${api}/repos/${repo}/releases`, {
     method: "POST",
     headers: {
@@ -49,8 +59,11 @@ const releaseName = `Build ${buildId.slice(0, 8)}`;
   const release = await createRes.json();
   console.log("Release created:", release.html_url);
 
-  const uploadUrl = `https://uploads.github.com/repos/${repo}/releases/${release.id}/assets?name=${assetName}`;
+  // 2. Upload asset with custom name
+  const uploadUrl = `https://uploads.github.com/repos/${repo}/releases/${release.id}/assets?name=${encodeURIComponent(assetName)}`;
   const fileBuffer = fs.readFileSync(apkPath);
+  const sizeMB = (fileBuffer.length / 1024 / 1024).toFixed(2);
+  console.log(`Uploading ${assetName} (${sizeMB} MB)...`);
 
   const uploadRes = await fetch(uploadUrl, {
     method: "POST",
@@ -70,6 +83,7 @@ const releaseName = `Build ${buildId.slice(0, 8)}`;
   }
 
   const asset = await uploadRes.json();
+  console.log("✓ Uploaded:", asset.browser_download_url);
   console.log(asset.browser_download_url);
 })().catch((e) => {
   console.error("Error:", e.message);
