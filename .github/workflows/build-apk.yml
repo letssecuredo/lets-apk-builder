@@ -17,6 +17,9 @@ jobs:
     timeout-minutes: 25
 
     steps:
+      # ═══════════════════════════════════════════════════════════════
+      # 1. Checkout
+      # ═══════════════════════════════════════════════════════════════
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -29,6 +32,9 @@ jobs:
           STEP_INDEX: "1"
         run: node scripts/notify-step.js
 
+      # ═══════════════════════════════════════════════════════════════
+      # 2. Environment setup
+      # ═══════════════════════════════════════════════════════════════
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -60,6 +66,9 @@ jobs:
           STEP_INDEX: "2"
         run: node scripts/notify-step.js
 
+      # ═══════════════════════════════════════════════════════════════
+      # 3. Fetch config + ZIP from backend
+      # ═══════════════════════════════════════════════════════════════
       - name: Fetch full config from backend
         env:
           BUILD_ID: ${{ github.event.inputs.buildId }}
@@ -97,19 +106,26 @@ jobs:
           STEP_INDEX: "3"
         run: node scripts/notify-step.js
 
-      # ⭐ Reset module flags before installing modules
+      # ═══════════════════════════════════════════════════════════════
+      # 4. Reset flags + SCAN modules (metadata only)
+      # ═══════════════════════════════════════════════════════════════
       - name: Reset module flags
         run: rm -f module-flags.json || true
 
-      - name: Install custom modules
+      # ⭐ SCAN phase — reads module.json from each module,
+      # writes module-flags.json (used by generate-project.js)
+      - name: Scan custom modules
         env:
           BUILD_ID: ${{ github.event.inputs.buildId }}
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
         run: |
           npm install --no-save node-fetch@2
-          node scripts/install-custom-modules.js "$BUILD_ID"
+          node scripts/install-custom-modules.js "$BUILD_ID" scan
 
+      # ═══════════════════════════════════════════════════════════════
+      # 5. Generate Android project (reads module-flags.json)
+      # ═══════════════════════════════════════════════════════════════
       - name: Generate Android project
         run: node scripts/generate-project.js config.json
 
@@ -127,6 +143,20 @@ jobs:
           STEP_INDEX: "4"
         run: node scripts/notify-step.js
 
+      # ═══════════════════════════════════════════════════════════════
+      # 6. INSTALL modules (Kotlin, layouts, deps into generated project)
+      # ═══════════════════════════════════════════════════════════════
+      # ⭐ INSTALL phase — extracts full module ZIPs into android-project/
+      - name: Install custom modules
+        env:
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: node scripts/install-custom-modules.js "$BUILD_ID"
+
+      # ═══════════════════════════════════════════════════════════════
+      # 7. Build APK
+      # ═══════════════════════════════════════════════════════════════
       - name: Build APK
         working-directory: android-project
         run: gradle assembleRelease --no-daemon --stacktrace
@@ -140,6 +170,9 @@ jobs:
           STEP_INDEX: "5"
         run: node scripts/notify-step.js
 
+      # ═══════════════════════════════════════════════════════════════
+      # 8. Sign APK
+      # ═══════════════════════════════════════════════════════════════
       - name: Sign APK
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -171,6 +204,9 @@ jobs:
           STEP_INDEX: "6"
         run: node scripts/notify-step.js
 
+      # ═══════════════════════════════════════════════════════════════
+      # 9. Upload to GitHub Releases
+      # ═══════════════════════════════════════════════════════════════
       - name: Upload to GitHub Releases
         id: upload
         env:
@@ -190,6 +226,9 @@ jobs:
           STEP_INDEX: "7"
         run: node scripts/notify-step.js
 
+      # ═══════════════════════════════════════════════════════════════
+      # 10. Notify completed / failed
+      # ═══════════════════════════════════════════════════════════════
       - name: Notify completed
         if: success()
         env:
