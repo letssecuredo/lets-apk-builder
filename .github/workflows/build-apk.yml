@@ -53,6 +53,14 @@ jobs:
           echo "PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools" >> $GITHUB_ENV
           sdkmanager --version || true
 
+      # ⭐ ImageMagick for icon conversion
+      - name: Install ImageMagick
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y imagemagick
+          convert --version
+          echo "✓ ImageMagick installed"
+
       - name: Install Android build tools
         run: |
           yes | sdkmanager "platforms;android-34" "build-tools;34.0.0" >/dev/null 2>&1 || true
@@ -67,7 +75,7 @@ jobs:
         run: node scripts/notify-step.js
 
       # ═══════════════════════════════════════════════════════════════
-      # 3. Fetch config + ZIP from backend
+      # 3. Fetch config + ZIP
       # ═══════════════════════════════════════════════════════════════
       - name: Fetch full config from backend
         env:
@@ -107,7 +115,7 @@ jobs:
         run: node scripts/notify-step.js
 
       # ═══════════════════════════════════════════════════════════════
-      # 4. Reset flags + SCAN modules
+      # 4. Scan modules
       # ═══════════════════════════════════════════════════════════════
       - name: Reset module flags
         run: rm -f module-flags.json || true
@@ -142,7 +150,7 @@ jobs:
         run: node scripts/notify-step.js
 
       # ═══════════════════════════════════════════════════════════════
-      # 6. INSTALL modules
+      # 6. Install modules
       # ═══════════════════════════════════════════════════════════════
       - name: Install custom modules
         env:
@@ -168,7 +176,7 @@ jobs:
         run: node scripts/notify-step.js
 
       # ═══════════════════════════════════════════════════════════════
-      # 7b. ⭐ Determine APK filename from app name
+      # 7b. Compute APK filename
       # ═══════════════════════════════════════════════════════════════
       - name: Compute APK filename
         id: apkname
