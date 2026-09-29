@@ -85,10 +85,7 @@ async function runScan() {
 
   console.log(`Found ${modules.length} module(s): ${modules.map(m => m.id).join(", ")}`);
 
-  const flags = {
-    overrideMainActivity: false,
-    modules: [],
-  };
+  const flags = { overrideMainActivity: false, modules: [] };
 
   for (const mod of modules) {
     try {
@@ -110,9 +107,7 @@ async function runScan() {
       console.log(`  ✓ ${meta.name} v${meta.version}`);
 
       flags.modules.push({
-        id: mod.id,
-        name: meta.name,
-        version: meta.version,
+        id: mod.id, name: meta.name, version: meta.version,
         overrideMainActivity: meta.overrideMainActivity === true,
       });
 
@@ -129,7 +124,6 @@ async function runScan() {
 
   fs.writeFileSync("module-flags.json", JSON.stringify(flags, null, 2));
   console.log("✓ Wrote module-flags.json");
-  console.log("  overrideMainActivity:", flags.overrideMainActivity);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -145,9 +139,7 @@ const FORBIDDEN = [
 
 function scanForThreats(content, file) {
   for (const p of FORBIDDEN) {
-    if (p.test(content)) {
-      throw new Error(`Forbidden pattern in ${file}: ${p}`);
-    }
+    if (p.test(content)) throw new Error(`Forbidden pattern in ${file}: ${p}`);
   }
 }
 
@@ -174,7 +166,7 @@ async function installModuleIntoProject(modId, cfg, javaDir, resDir, assetsDir) 
   const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
   console.log(`  ✓ Module: ${meta.name} v${meta.version}`);
 
-  // Kotlin
+  // Kotlin files
   for (const f of fs.readdirSync(srcDir).filter(f => f.endsWith(".kt"))) {
     let content = fs.readFileSync(path.join(srcDir, f), "utf8");
     scanForThreats(content, f);
@@ -279,7 +271,7 @@ function applyDepsToGradle(allDeps) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ⭐ FIXED: applyManifestFragments — proper placement
+// ⭐ FIXED: Manifest merge with dedupe + tools:node="merge"
 // ═══════════════════════════════════════════════════════════════
 function applyManifestFragments(fragments) {
   if (fragments.length === 0) return;
@@ -287,48 +279,90 @@ function applyManifestFragments(fragments) {
   const manifestPath = path.join(PROJECT_ROOT, "app/src/main/AndroidManifest.xml");
   let content = fs.readFileSync(manifestPath, "utf8");
 
-  const rootLevel = [];   // uses-permission, uses-feature → before <application>
-  const appLevel = [];    // activity, service, receiver, provider → inside <application>
+  // ─── Ensure xmlns:tools declared ───
+  if (!content.includes("xmlns:tools=")) {
+    content = content.replace(
+      /<manifest\s+([^>]*?)>/,
+      `<manifest $1 xmlns:tools="http://schemas.android.com/tools">`
+    );
+  }
+
+  // ─── Extract existing permissions & features to dedupe ───
+  const existingPermissions = new Set();
+  const existingFeatures = new Set();
+
+  let m;
+  const permRegex = /<uses-permission\s+[^>]*android:name="([^"]+)"/g;
+  while ((m = permRegex.exec(content)) !== null) existingPermissions.add(m[1]);
+
+  const featRegex = /<uses-feature\s+[^>]*android:name="([^"]+)"/g;
+  while ((m = featRegex.exec(content)) !== null) existingFeatures.add(m[1]);
+
+  const rootLevel = [];
+  const appLevel = [];
 
   for (const fragment of fragments) {
-    // Extract root-level elements
-    const rootTagRegex = /<(uses-permission|uses-feature|permission|uses-sdk)\b[^>]*\/?>(?:[\s\S]*?<\/\1>)?/g;
-    let m;
+    // ─── Root-level: uses-permission, uses-feature ───
+    const rootTagRegex = /<(uses-permission|uses-feature)\b[^>]*\/>/g;
     while ((m = rootTagRegex.exec(fragment)) !== null) {
-      rootLevel.push(m[0].trim());
+      const elem = m[0].trim();
+      const tag = m[1];
+      const nameMatch = elem.match(/android:name="([^"]+)"/);
+      if (nameMatch) {
+        const name = nameMatch[1];
+        if (tag === "uses-permission" && existingPermissions.has(name)) {
+          console.log(`  ⊘ Skip duplicate permission: ${name}`);
+          continue;
+        }
+        if (tag === "uses-feature" && existingFeatures.has(name)) {
+          console.log(`  ⊘ Skip duplicate feature: ${name}`);
+          continue;
+        }
+        // Mark as added to avoid duplicates within fragments too
+        if (tag === "uses-permission") existingPermissions.add(name);
+        if (tag === "uses-feature") existingFeatures.add(name);
+      }
+      // Add tools:node="merge" to be safe
+      const merged = elem.replace(
+        /<uses-(permission|feature)/,
+        `<uses-$1 tools:node="merge"`
+      );
+      rootLevel.push(merged);
     }
 
-    // Extract app-level elements
+    // ─── App-level: activity, service, receiver, provider ───
     const appTagRegex = /<(activity|service|receiver|provider)\b[\s\S]*?<\/\1>|<(activity|service|receiver|provider)\b[^>]*\/>/g;
     while ((m = appTagRegex.exec(fragment)) !== null) {
-      appLevel.push(m[0].trim());
+      const elem = m[0].trim();
+      const merged = elem.replace(
+        /<(activity|service|receiver|provider)/,
+        `<$1 tools:node="merge"`
+      );
+      appLevel.push(merged);
     }
   }
 
-  // Deduplicate
-  const uniqueRoot = [...new Set(rootLevel)];
-  const uniqueApp = [...new Set(appLevel)];
-
-  // Insert root-level elements right before <application ...>
-  if (uniqueRoot.length > 0) {
+  // ─── Insert root-level elements right before <application ───
+  if (rootLevel.length > 0) {
     content = content.replace(
       /(\s*<application\b)/,
-      "\n  " + uniqueRoot.join("\n  ") + "\n$1"
+      "\n  " + rootLevel.join("\n  ") + "\n$1"
     );
+    console.log(`✓ Inserted ${rootLevel.length} root-level entries (permissions/features)`);
   }
 
-  // Insert app-level elements right before </application>
-  if (uniqueApp.length > 0) {
+  // ─── Insert app-level elements right before </application> ───
+  if (appLevel.length > 0) {
     content = content.replace(
       /(\s*<\/application>)/,
-      "\n  " + uniqueApp.join("\n  ") + "\n$1"
+      "\n  " + appLevel.join("\n  ") + "\n$1"
     );
+    console.log(`✓ Inserted ${appLevel.length} app-level entries (activities/services)`);
   }
 
   fs.writeFileSync(manifestPath, content);
-  console.log(`✓ Manifest: ${uniqueRoot.length} root-level + ${uniqueApp.length} app-level entries inserted`);
 
-  // Verify LAUNCHER exists if native mode
+  // ─── Verify LAUNCHER if native mode ───
   const flagsPath = path.join(process.cwd(), "module-flags.json");
   if (fs.existsSync(flagsPath)) {
     try {
@@ -336,8 +370,7 @@ function applyManifestFragments(fragments) {
       if (flags.overrideMainActivity) {
         const finalManifest = fs.readFileSync(manifestPath, "utf8");
         if (!finalManifest.includes("android.intent.category.LAUNCHER")) {
-          console.error("❌ ERROR: Native mode but no LAUNCHER activity found in manifest!");
-          console.error("   The module's manifest.xml must declare a launcher activity.");
+          console.error("❌ Native mode but NO LAUNCHER activity in manifest!");
           process.exit(1);
         }
         console.log("✓ Launcher activity present");
