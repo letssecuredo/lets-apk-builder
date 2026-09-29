@@ -4,16 +4,7 @@
  *
  * Two modes:
  *   1. scan mode:    `node install-custom-modules.js <buildId> scan`
- *      → Fetches module list from backend
- *      → Extracts module.json from each
- *      → Writes module-flags.json (used by generate-project.js)
- *      → Doesn't touch android-project (which doesn't exist yet)
- *
  *   2. install mode: `node install-custom-modules.js <buildId>`
- *      → Requires android-project to exist
- *      → Extracts full module ZIPs
- *      → Copies Kotlin, layouts, drawables into project
- *      → Applies deps.gradle and manifest.xml
  */
 const fs = require("fs");
 const path = require("path");
@@ -21,7 +12,7 @@ const { execSync } = require("child_process");
 const fetch = require("node-fetch");
 
 const BUILD_ID = process.argv[2];
-const MODE = process.argv[3] || "install"; // "scan" or "install"
+const MODE = process.argv[3] || "install";
 const BACKEND_URL = process.env.BACKEND_URL;
 const SECRET = process.env.WEBHOOK_SECRET;
 const PROJECT_ROOT = "android-project";
@@ -62,7 +53,7 @@ async function fetchModuleZip(moduleId) {
   const url = `${BACKEND_URL}/api/internal/module/${BUILD_ID}/${moduleId}`;
   const res = await fetch(url, { headers: { "X-Internal-Secret": SECRET } });
   if (!res.ok) return null;
-  return res.json(); // { base64, name, size }
+  return res.json();
 }
 
 function extractZip(base64, destDir) {
@@ -72,7 +63,6 @@ function extractZip(base64, destDir) {
   execSync(`unzip -q -o "${zipPath}" -d "${destDir}/x"`, { stdio: "inherit" });
   fs.unlinkSync(zipPath);
 
-  // Flatten if single wrapper folder
   let srcDir = path.join(destDir, "x");
   const entries = fs.readdirSync(srcDir);
   if (entries.length === 1 && fs.statSync(path.join(srcDir, entries[0])).isDirectory()) {
@@ -184,7 +174,7 @@ async function installModuleIntoProject(modId, cfg, javaDir, resDir, assetsDir) 
   const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
   console.log(`  ✓ Module: ${meta.name} v${meta.version}`);
 
-  // Kotlin files
+  // Kotlin
   for (const f of fs.readdirSync(srcDir).filter(f => f.endsWith(".kt"))) {
     let content = fs.readFileSync(path.join(srcDir, f), "utf8");
     scanForThreats(content, f);
@@ -288,17 +278,74 @@ function applyDepsToGradle(allDeps) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// ⭐ FIXED: applyManifestFragments — proper placement
+// ═══════════════════════════════════════════════════════════════
 function applyManifestFragments(fragments) {
   if (fragments.length === 0) return;
+
   const manifestPath = path.join(PROJECT_ROOT, "app/src/main/AndroidManifest.xml");
   let content = fs.readFileSync(manifestPath, "utf8");
-  const combined = fragments.join("\n  ");
-  content = content.replace(
-    "</application>",
-    `\n  ${combined}\n  </application>`
-  );
+
+  const rootLevel = [];   // uses-permission, uses-feature → before <application>
+  const appLevel = [];    // activity, service, receiver, provider → inside <application>
+
+  for (const fragment of fragments) {
+    // Extract root-level elements
+    const rootTagRegex = /<(uses-permission|uses-feature|permission|uses-sdk)\b[^>]*\/?>(?:[\s\S]*?<\/\1>)?/g;
+    let m;
+    while ((m = rootTagRegex.exec(fragment)) !== null) {
+      rootLevel.push(m[0].trim());
+    }
+
+    // Extract app-level elements
+    const appTagRegex = /<(activity|service|receiver|provider)\b[\s\S]*?<\/\1>|<(activity|service|receiver|provider)\b[^>]*\/>/g;
+    while ((m = appTagRegex.exec(fragment)) !== null) {
+      appLevel.push(m[0].trim());
+    }
+  }
+
+  // Deduplicate
+  const uniqueRoot = [...new Set(rootLevel)];
+  const uniqueApp = [...new Set(appLevel)];
+
+  // Insert root-level elements right before <application ...>
+  if (uniqueRoot.length > 0) {
+    content = content.replace(
+      /(\s*<application\b)/,
+      "\n  " + uniqueRoot.join("\n  ") + "\n$1"
+    );
+  }
+
+  // Insert app-level elements right before </application>
+  if (uniqueApp.length > 0) {
+    content = content.replace(
+      /(\s*<\/application>)/,
+      "\n  " + uniqueApp.join("\n  ") + "\n$1"
+    );
+  }
+
   fs.writeFileSync(manifestPath, content);
-  console.log(`✓ Applied ${fragments.length} manifest fragments`);
+  console.log(`✓ Manifest: ${uniqueRoot.length} root-level + ${uniqueApp.length} app-level entries inserted`);
+
+  // Verify LAUNCHER exists if native mode
+  const flagsPath = path.join(process.cwd(), "module-flags.json");
+  if (fs.existsSync(flagsPath)) {
+    try {
+      const flags = JSON.parse(fs.readFileSync(flagsPath, "utf8"));
+      if (flags.overrideMainActivity) {
+        const finalManifest = fs.readFileSync(manifestPath, "utf8");
+        if (!finalManifest.includes("android.intent.category.LAUNCHER")) {
+          console.error("❌ ERROR: Native mode but no LAUNCHER activity found in manifest!");
+          console.error("   The module's manifest.xml must declare a launcher activity.");
+          process.exit(1);
+        }
+        console.log("✓ Launcher activity present");
+      }
+    } catch (e) {
+      console.warn("Could not verify launcher:", e.message);
+    }
+  }
 }
 
 async function runInstall() {
