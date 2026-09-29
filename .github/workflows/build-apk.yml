@@ -107,13 +107,11 @@ jobs:
         run: node scripts/notify-step.js
 
       # ═══════════════════════════════════════════════════════════════
-      # 4. Reset flags + SCAN modules (metadata only)
+      # 4. Reset flags + SCAN modules
       # ═══════════════════════════════════════════════════════════════
       - name: Reset module flags
         run: rm -f module-flags.json || true
 
-      # ⭐ SCAN phase — reads module.json from each module,
-      # writes module-flags.json (used by generate-project.js)
       - name: Scan custom modules
         env:
           BUILD_ID: ${{ github.event.inputs.buildId }}
@@ -124,7 +122,7 @@ jobs:
           node scripts/install-custom-modules.js "$BUILD_ID" scan
 
       # ═══════════════════════════════════════════════════════════════
-      # 5. Generate Android project (reads module-flags.json)
+      # 5. Generate Android project
       # ═══════════════════════════════════════════════════════════════
       - name: Generate Android project
         run: node scripts/generate-project.js config.json
@@ -144,9 +142,8 @@ jobs:
         run: node scripts/notify-step.js
 
       # ═══════════════════════════════════════════════════════════════
-      # 6. INSTALL modules (Kotlin, layouts, deps into generated project)
+      # 6. INSTALL modules
       # ═══════════════════════════════════════════════════════════════
-      # ⭐ INSTALL phase — extracts full module ZIPs into android-project/
       - name: Install custom modules
         env:
           BUILD_ID: ${{ github.event.inputs.buildId }}
@@ -171,7 +168,30 @@ jobs:
         run: node scripts/notify-step.js
 
       # ═══════════════════════════════════════════════════════════════
-      # 8. Sign APK
+      # 7b. ⭐ Determine APK filename from app name
+      # ═══════════════════════════════════════════════════════════════
+      - name: Compute APK filename
+        id: apkname
+        run: |
+          APP_NAME=$(node -e "
+            const cfg = require('./config.json');
+            let safe = String(cfg.appName || 'app')
+              .replace(/[^a-zA-Z0-9\s\-_]+/g, '')
+              .trim()
+              .replace(/\s+/g, '-');
+            if (!safe) safe = 'app';
+            console.log(safe);
+          ")
+          VERSION=$(node -e "
+            const cfg = require('./config.json');
+            console.log(String(cfg.versionName || '1.0.0').replace(/[^a-zA-Z0-9\.\-_]/g, ''));
+          ")
+          APK_FILENAME="${APP_NAME}-v${VERSION}.apk"
+          echo "APK_FILENAME=$APK_FILENAME" >> $GITHUB_ENV
+          echo "✓ APK will be named: $APK_FILENAME"
+
+      # ═══════════════════════════════════════════════════════════════
+      # 8. Sign APK + Rename
       # ═══════════════════════════════════════════════════════════════
       - name: Sign APK
         env:
@@ -193,7 +213,11 @@ jobs:
             --out app-signed.apk \
             app-aligned.apk
           $ANDROID_HOME/build-tools/$BT/apksigner verify app-signed.apk
-          ls -la app-signed.apk
+
+          # ⭐ Rename to app-name-vX.Y.Z.apk
+          mv app-signed.apk "$APK_FILENAME"
+          ls -la "$APK_FILENAME"
+          echo "✓ Final APK: $APK_FILENAME"
 
       - name: Notify signed
         env:
@@ -213,7 +237,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
-          APK_URL=$(node scripts/upload-to-github-release.js app-signed.apk "${{ github.event.inputs.buildId }}" | tail -n1)
+          APK_URL=$(node scripts/upload-to-github-release.js "$APK_FILENAME" "${{ github.event.inputs.buildId }}" | tail -n1)
           echo "apk_url=$APK_URL" >> "$GITHUB_OUTPUT"
           echo "Uploaded to: $APK_URL"
 
