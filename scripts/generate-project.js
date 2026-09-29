@@ -2,10 +2,10 @@
 /* Generates a complete Android WebView project from config.json
  * Supports:
  *   - 40+ Android permissions (12 categories)
- *   - 3 app modes: offline | online | hybrid
- *   - Auto-flatten offline ZIP (finds index.html anywhere in the archive)
+ *   - 4 app modes: offline | online | hybrid | native
+ *   - Auto-flatten offline ZIP (finds index.html anywhere)
+ *   - Module override for MainActivity (custom native apps)
  *   - Robust icon handling (ImageMagick normalize + fallback)
- *   - Custom module MainActivity override
  */
 const fs = require("fs");
 const path = require("path");
@@ -21,24 +21,30 @@ const resDir = path.join(ROOT, "app/src/main/res");
 const assetsDir = path.join(ROOT, "app/src/main/assets");
 
 // ═══════════════════════════════════════════════════════════════
-// CHECK: Did any custom module override MainActivity?
-// (install-custom-modules.js writes module-flags.json)
+// MODE FLAGS (from install-custom-modules.js)
 // ═══════════════════════════════════════════════════════════════
 let moduleOverridesMainActivity = false;
-let moduleProvidesFileShareHtml = false;
+let moduleFlags = {};
 try {
   const flagsPath = path.join(process.cwd(), "module-flags.json");
   if (fs.existsSync(flagsPath)) {
-    const flags = JSON.parse(fs.readFileSync(flagsPath, "utf8"));
-    moduleOverridesMainActivity = flags.overrideMainActivity === true;
-    moduleProvidesFileShareHtml = flags.providesFileShareHtml === true;
-    console.log("📋 Module flags loaded:", flags);
+    moduleFlags = JSON.parse(fs.readFileSync(flagsPath, "utf8"));
+    moduleOverridesMainActivity = moduleFlags.overrideMainActivity === true;
+    console.log("Module flags:", JSON.stringify(moduleFlags));
   } else {
-    console.log("📋 No module flags (using default MainActivity)");
+    console.log("No module-flags.json — using default MainActivity");
   }
 } catch (e) {
-  console.warn("⚠️ Failed to read module-flags.json:", e.message);
+  console.warn("Failed to read module-flags.json:", e.message);
 }
+
+const isNativeMode = (cfg.appMode === "native");
+const skipDefaultMainActivity = isNativeMode || moduleOverridesMainActivity;
+
+console.log("appMode:", cfg.appMode);
+console.log("isNativeMode:", isNativeMode);
+console.log("moduleOverridesMainActivity:", moduleOverridesMainActivity);
+console.log("skipDefaultMainActivity:", skipDefaultMainActivity);
 
 // Clean
 fs.rmSync(ROOT, { recursive: true, force: true });
@@ -80,28 +86,17 @@ if (fs.existsSync(offlineZipB64Path)) {
       execSync(`unzip -q -o "${zipPath}" -d "${tmpDir}"`, { stdio: "inherit" });
       fs.unlinkSync(zipPath);
 
-      // Recursively locate the folder containing index.html
       function findIndexHtml(dir, depth = 0) {
         if (depth > 6) return null;
         let entries;
-        try {
-          entries = fs.readdirSync(dir, { withFileTypes: true });
-        } catch {
-          return null;
-        }
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+        catch { return null; }
 
         for (const e of entries) {
-          if (e.isFile() && e.name.toLowerCase() === "index.html") {
-            return dir;
-          }
+          if (e.isFile() && e.name.toLowerCase() === "index.html") return dir;
         }
-
         for (const e of entries) {
-          if (
-            e.isDirectory() &&
-            e.name !== "__MACOSX" &&
-            !e.name.startsWith(".")
-          ) {
+          if (e.isDirectory() && e.name !== "__MACOSX" && !e.name.startsWith(".")) {
             const found = findIndexHtml(path.join(dir, e.name), depth + 1);
             if (found) return found;
           }
@@ -112,7 +107,7 @@ if (fs.existsSync(offlineZipB64Path)) {
       const indexDir = findIndexHtml(tmpDir);
 
       if (!indexDir) {
-        console.warn("⚠ No index.html found in ZIP — offline mode will fail");
+        console.warn("⚠ No index.html found in ZIP");
       } else {
         console.log("Found index.html at:", indexDir);
 
@@ -130,51 +125,31 @@ if (fs.existsSync(offlineZipB64Path)) {
           }
         }
 
-        // NOTE: Don't delete assetsDir if module already provided file-share.html
-        // Since module flags load first, module files are already in place
-        // We need to MERGE instead of replace if module has files
-        if (moduleProvidesFileShareHtml) {
-          // Merge mode: copy without deleting
-          console.log("Merging offline assets (module files preserved)");
-          copyRecursive(indexDir, assetsDir);
-        } else {
-          // Replace mode
-          fs.rmSync(assetsDir, { recursive: true, force: true });
-          fs.mkdirSync(assetsDir, { recursive: true });
-          copyRecursive(indexDir, assetsDir);
-        }
+        fs.rmSync(assetsDir, { recursive: true, force: true });
+        fs.mkdirSync(assetsDir, { recursive: true });
+        copyRecursive(indexDir, assetsDir);
 
         function cleanJunk(dir) {
           if (!fs.existsSync(dir)) return;
           for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
             const p = path.join(dir, e.name);
-            if (
-              e.name === "__MACOSX" ||
-              e.name === ".DS_Store" ||
-              e.name.startsWith("._")
-            ) {
+            if (e.name === "__MACOSX" || e.name === ".DS_Store" || e.name.startsWith("._")) {
               if (e.isDirectory()) fs.rmSync(p, { recursive: true, force: true });
               else fs.unlinkSync(p);
-            } else if (e.isDirectory()) {
-              cleanJunk(p);
-            }
+            } else if (e.isDirectory()) cleanJunk(p);
           }
         }
         cleanJunk(assetsDir);
 
-        const rootIndex = path.join(assetsDir, "index.html");
-        if (fs.existsSync(rootIndex)) {
+        if (fs.existsSync(path.join(assetsDir, "index.html"))) {
           hasOffline = true;
-          const files = fs.readdirSync(assetsDir);
           console.log("✓ Offline assets extracted and flattened to assets/");
-          console.log("Assets:", files.join(", "));
         } else {
-          console.warn("⚠ index.html still not at assets root after flatten");
+          console.warn("⚠ index.html still not at assets root");
         }
       }
 
       fs.rmSync(tmpDir, { recursive: true, force: true });
-
     } catch (e) {
       console.warn("Offline ZIP extraction failed:", e.message);
     }
@@ -192,9 +167,7 @@ fs.writeFileSync(path.join(ROOT, "build.gradle"),
 }
 `);
 
-// ═══════════════════════════════════════════════════════════════
 // settings.gradle
-// ═══════════════════════════════════════════════════════════════
 fs.writeFileSync(path.join(ROOT, "settings.gradle"),
 `pluginManagement {
   repositories { google(); mavenCentral(); gradlePluginPortal() }
@@ -207,9 +180,7 @@ rootProject.name = "LetsApkBuilder"
 include ':app'
 `);
 
-// ═══════════════════════════════════════════════════════════════
 // gradle.properties
-// ═══════════════════════════════════════════════════════════════
 fs.writeFileSync(path.join(ROOT, "gradle.properties"),
 `org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
 android.useAndroidX=true
@@ -217,9 +188,7 @@ android.nonTransitiveRClass=true
 kotlin.code.style=official
 `);
 
-// ═══════════════════════════════════════════════════════════════
 // local.properties
-// ═══════════════════════════════════════════════════════════════
 const sdkDir = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT || "/usr/local/lib/android/sdk";
 fs.writeFileSync(path.join(ROOT, "local.properties"), `sdk.dir=${sdkDir}\n`);
 
@@ -228,24 +197,6 @@ fs.writeFileSync(path.join(ROOT, "local.properties"), `sdk.dir=${sdkDir}\n`);
 // ═══════════════════════════════════════════════════════════════
 const minSdk = 21;
 const targetSdk = 34;
-
-// Load custom module dependencies (if any)
-let customDeps = [];
-try {
-  const customDepsPath = path.join(process.cwd(), "custom-modules.deps.json");
-  if (fs.existsSync(customDepsPath)) {
-    const data = JSON.parse(fs.readFileSync(customDepsPath, "utf8"));
-    customDeps = data.dependencies || [];
-    console.log(`Custom module deps: ${customDeps.length}`);
-  }
-} catch (e) {
-  console.warn("Custom deps load failed:", e.message);
-}
-
-const customDepsBlock = customDeps.length > 0
-  ? `\n  // ═══ Custom module dependencies ═══\n  ${customDeps.join("\n  ")}`
-  : "";
-
 fs.writeFileSync(path.join(ROOT, "app/build.gradle"),
 `plugins {
   id 'com.android.application'
@@ -285,7 +236,7 @@ dependencies {
   implementation 'androidx.core:core-ktx:1.13.1'
   implementation 'androidx.appcompat:appcompat:1.7.0'
   implementation 'androidx.webkit:webkit:1.11.0'
-  implementation 'com.google.android.material:material:1.12.0'${customDepsBlock}
+  implementation 'com.google.android.material:material:1.12.0'
 }
 `);
 
@@ -295,11 +246,11 @@ fs.writeFileSync(path.join(ROOT, "app/proguard-rules.pro"),
 `);
 
 // ═══════════════════════════════════════════════════════════════
-// MANIFEST — build permission & feature list
+// MANIFEST
 // ═══════════════════════════════════════════════════════════════
-const mp = []; // manifest permissions
-const mf = []; // manifest features
-const rp = []; // runtime permissions
+const mp = [];
+const mf = [];
+const rp = [];
 
 mp.push(`<uses-permission android:name="android.permission.INTERNET" />`);
 
@@ -309,16 +260,12 @@ if (cfg.enableChangeNetwork) mp.push(`<uses-permission android:name="android.per
 if (cfg.enableCamera) {
   mp.push(`<uses-permission android:name="android.permission.CAMERA" />`);
   mf.push(`<uses-feature android:name="android.hardware.camera" android:required="false" />`);
-  mf.push(`<uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />`);
   rp.push("android.permission.CAMERA");
 }
-
 if (cfg.enableMicrophone) {
   mp.push(`<uses-permission android:name="android.permission.RECORD_AUDIO" />`);
-  mf.push(`<uses-feature android:name="android.hardware.microphone" android:required="false" />`);
   rp.push("android.permission.RECORD_AUDIO");
 }
-
 if (cfg.enableAudioSettings) mp.push(`<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />`);
 
 if (cfg.enableGeolocation) {
@@ -329,13 +276,7 @@ if (cfg.enableCoarseLocation) {
   mp.push(`<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />`);
   rp.push("android.permission.ACCESS_COARSE_LOCATION");
 }
-if (cfg.enableBackgroundLocation) {
-  mp.push(`<uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />`);
-}
-if (cfg.enableGeolocation || cfg.enableCoarseLocation || cfg.enableBackgroundLocation) {
-  mf.push(`<uses-feature android:name="android.hardware.location" android:required="false" />`);
-  mf.push(`<uses-feature android:name="android.hardware.location.gps" android:required="false" />`);
-}
+if (cfg.enableBackgroundLocation) mp.push(`<uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />`);
 
 if (cfg.enableReadMediaImages) {
   mp.push(`<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />`);
@@ -360,19 +301,15 @@ if (cfg.enableBluetooth) {
   mp.push(`<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />`);
   mp.push(`<uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />`);
   rp.push("android.permission.BLUETOOTH_SCAN", "android.permission.BLUETOOTH_CONNECT");
-  mf.push(`<uses-feature android:name="android.hardware.bluetooth" android:required="false" />`);
-  mf.push(`<uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />`);
 }
 if (cfg.enableBluetoothLegacy) {
   mp.push(`<uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />`);
   mp.push(`<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />`);
 }
-
 if (cfg.enableNfc) {
   mp.push(`<uses-permission android:name="android.permission.NFC" />`);
   mf.push(`<uses-feature android:name="android.hardware.nfc" android:required="false" />`);
 }
-
 if (cfg.enableNearbyWifi) {
   mp.push(`<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" />`);
   rp.push("android.permission.NEARBY_WIFI_DEVICES");
@@ -380,7 +317,6 @@ if (cfg.enableNearbyWifi) {
 
 if (cfg.enableWifi) mp.push(`<uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />`);
 if (cfg.enableChangeWifi) mp.push(`<uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />`);
-
 if (cfg.enableVibration) mp.push(`<uses-permission android:name="android.permission.VIBRATE" />`);
 if (cfg.enableWakeLock) mp.push(`<uses-permission android:name="android.permission.WAKE_LOCK" />`);
 if (cfg.enableFlashlight) mf.push(`<uses-feature android:name="android.hardware.camera.flash" android:required="false" />`);
@@ -393,7 +329,6 @@ if (cfg.enableActivityRecognition) {
   mp.push(`<uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />`);
   rp.push("android.permission.ACTIVITY_RECOGNITION");
 }
-
 if (cfg.enableReadPhoneState) {
   mp.push(`<uses-permission android:name="android.permission.READ_PHONE_STATE" />`);
   rp.push("android.permission.READ_PHONE_STATE");
@@ -402,7 +337,6 @@ if (cfg.enableCallPhone) {
   mp.push(`<uses-permission android:name="android.permission.CALL_PHONE" />`);
   rp.push("android.permission.CALL_PHONE");
 }
-
 if (cfg.enableReadContacts) {
   mp.push(`<uses-permission android:name="android.permission.READ_CONTACTS" />`);
   rp.push("android.permission.READ_CONTACTS");
@@ -415,7 +349,6 @@ if (cfg.enableGetAccounts) {
   mp.push(`<uses-permission android:name="android.permission.GET_ACCOUNTS" />`);
   rp.push("android.permission.GET_ACCOUNTS");
 }
-
 if (cfg.enableSendSms) {
   mp.push(`<uses-permission android:name="android.permission.SEND_SMS" />`);
   rp.push("android.permission.SEND_SMS");
@@ -428,7 +361,6 @@ if (cfg.enableReadSms) {
   mp.push(`<uses-permission android:name="android.permission.READ_SMS" />`);
   rp.push("android.permission.READ_SMS");
 }
-
 if (cfg.enableReadCalendar) {
   mp.push(`<uses-permission android:name="android.permission.READ_CALENDAR" />`);
   rp.push("android.permission.READ_CALENDAR");
@@ -437,7 +369,6 @@ if (cfg.enableWriteCalendar) {
   mp.push(`<uses-permission android:name="android.permission.WRITE_CALENDAR" />`);
   rp.push("android.permission.WRITE_CALENDAR");
 }
-
 if (cfg.enableNotifications) {
   mp.push(`<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />`);
   rp.push("android.permission.POST_NOTIFICATIONS");
@@ -447,7 +378,6 @@ if (cfg.enableBootCompleted) mp.push(`<uses-permission android:name="android.per
 if (cfg.enableInstallShortcut) mp.push(`<uses-permission android:name="android.permission.INSTALL_SHORTCUT" />`);
 if (cfg.enableSystemAlertWindow) mp.push(`<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />`);
 if (cfg.enableInstallPackages) mp.push(`<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />`);
-
 if (cfg.enableBiometric) {
   mp.push(`<uses-permission android:name="android.permission.USE_BIOMETRIC" />`);
   rp.push("android.permission.USE_BIOMETRIC");
@@ -460,35 +390,21 @@ if (cfg.enableFingerprint) {
 console.log("Manifest permissions:", mp.length);
 console.log("Runtime permissions:", rp.length);
 
-// ═══════════════════════════════════════════════════════════════
-// CUSTOM MODULE MANIFEST FRAGMENTS
-// ═══════════════════════════════════════════════════════════════
-let customManifestBlock = "";
-try {
-  const customDepsPath = path.join(process.cwd(), "custom-modules.deps.json");
-  if (fs.existsSync(customDepsPath)) {
-    const data = JSON.parse(fs.readFileSync(customDepsPath, "utf8"));
-    const fragments = data.manifestFragments || [];
-    if (fragments.length > 0) {
-      customManifestBlock = "\n  <!-- Custom module manifest -->\n  " +
-        fragments.join("\n  ");
-      console.log(`Custom manifest fragments: ${fragments.length}`);
-    }
-  }
-} catch (e) {
-  console.warn("Custom manifest load failed:", e.message);
-}
-
 const orientationAttr =
   cfg.orientation === "landscape" ? 'android:screenOrientation="landscape"'
   : cfg.orientation === "portrait" ? 'android:screenOrientation="portrait"'
   : 'android:screenOrientation="unspecified"';
 
-// ⚠️ If module overrides MainActivity, don't declare it here
-// The module's manifest.xml should declare it as launcher
-const defaultLauncherActivity = moduleOverridesMainActivity
-  ? "" // module provides its own launcher
-  : `<activity
+// ⭐ MainActivity launcher declaration
+// In native mode, the module provides its own launcher activity.
+// We DON'T declare WebView MainActivity as launcher.
+let launcherBlock;
+if (skipDefaultMainActivity) {
+  // The module's manifest.xml will declare its own launcher activity
+  launcherBlock = `<!-- Launcher activity is provided by custom module -->`;
+} else {
+  launcherBlock = `
+      <activity
           android:name=".MainActivity"
           android:exported="true"
           android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"
@@ -499,6 +415,7 @@ const defaultLauncherActivity = moduleOverridesMainActivity
               <category android:name="android.intent.category.LAUNCHER" />
           </intent-filter>
       </activity>`;
+}
 
 const manifest =
 `<?xml version="1.0" encoding="utf-8"?>
@@ -507,7 +424,6 @@ const manifest =
   ${mp.join("\n  ")}
 
   ${mf.join("\n  ")}
-  ${customManifestBlock}
 
   <application
       android:allowBackup="true"
@@ -515,18 +431,17 @@ const manifest =
       android:label="@string/app_name"
       android:roundIcon="@mipmap/ic_launcher"
       android:supportsRtl="true"
-      android:usesCleartextTraffic="true"
+      android:usesCleartextTraffic="false"
       android:hardwareAccelerated="true"
-      android:networkSecurityConfig="@xml/network_security_config"
       android:theme="@style/AppTheme">
 
-      ${defaultLauncherActivity}
+      ${launcherBlock}
   </application>
 </manifest>
 `;
 fs.writeFileSync(path.join(ROOT, "app/src/main/AndroidManifest.xml"), manifest);
 
-// ─── res/values/strings.xml ───
+// res/values/strings.xml
 fs.writeFileSync(path.join(resDir, "values/strings.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <resources>
@@ -534,7 +449,7 @@ fs.writeFileSync(path.join(resDir, "values/strings.xml"),
 </resources>
 `);
 
-// ─── res/values/colors.xml ───
+// res/values/colors.xml
 fs.writeFileSync(path.join(resDir, "values/colors.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <resources>
@@ -543,7 +458,7 @@ fs.writeFileSync(path.join(resDir, "values/colors.xml"),
 </resources>
 `);
 
-// ─── res/values/styles.xml ───
+// res/values/styles.xml
 fs.writeFileSync(path.join(resDir, "values/styles.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <resources>
@@ -554,18 +469,6 @@ fs.writeFileSync(path.join(resDir, "values/styles.xml"),
     <item name="android:windowBackground">@android:color/white</item>
   </style>
 </resources>
-`);
-
-// ─── network security config ───
-fs.writeFileSync(path.join(resDir, "xml/network_security_config.xml"),
-`<?xml version="1.0" encoding="utf-8"?>
-<network-security-config>
-  <base-config cleartextTrafficPermitted="true">
-    <trust-anchors>
-      <certificates src="system" />
-    </trust-anchors>
-  </base-config>
-</network-security-config>
 `);
 
 // ═══════════════════════════════════════════════════════════════
@@ -585,23 +488,14 @@ if (cfg.iconBase64) {
   if (m) {
     userIconPath = path.join(ROOT, ".user-icon.png");
     fs.writeFileSync(userIconPath, Buffer.from(m[1], "base64"));
-    console.log("User icon saved:", fs.statSync(userIconPath).size, "bytes");
-  } else {
-    console.log("Icon base64 present but regex didn't match");
   }
-} else {
-  console.log("No iconBase64 in config — using fallback solid color");
 }
 
 let magickOk = false;
 try {
   execSync("which convert", { stdio: "pipe" });
   magickOk = true;
-  console.log("ImageMagick available");
-} catch {
-  magickOk = false;
-  console.log("ImageMagick NOT available — using fallback solid color");
-}
+} catch { magickOk = false; }
 
 for (const [dir, size] of Object.entries(iconSizes)) {
   const dest = path.join(resDir, dir, "ic_launcher.png");
@@ -610,58 +504,51 @@ for (const [dir, size] of Object.entries(iconSizes)) {
   if (userIconPath && magickOk) {
     try {
       execSync(
-        `convert "${userIconPath}" ` +
-        `-background none ` +
-        `-resize ${size}x${size} ` +
-        `-gravity center ` +
-        `-extent ${size}x${size} ` +
-        `-strip ` +
-        `-define png:color-type=6 ` +
-        `-depth 8 ` +
-        `PNG32:"${dest}"`,
+        `convert "${userIconPath}" -background none -resize ${size}x${size} ` +
+        `-gravity center -extent ${size}x${size} -strip ` +
+        `-define png:color-type=6 -depth 8 PNG32:"${dest}"`,
         { stdio: "pipe" }
       );
       done = true;
-      console.log(`✓ Icon ${dir} (${size}x${size}) from user icon`);
+      console.log(`✓ Icon ${dir} (${size}x${size})`);
     } catch (e) {
-      console.warn(`✗ ImageMagick failed for ${dir}: ${e.message}`);
+      console.warn(`Icon ${dir} failed: ${e.message}`);
     }
   }
-
   if (!done) {
     fs.writeFileSync(dest, generateSolidPng(cfg.themeColor, size));
-    console.log(`→ Icon ${dir} (${size}x${size}) using fallback color`);
   }
 }
 
 if (userIconPath && fs.existsSync(userIconPath)) fs.unlinkSync(userIconPath);
 
-// ─── assets/config.json ───
-fs.writeFileSync(path.join(assetsDir, "config.json"),
-  JSON.stringify({
-    appMode: cfg.appMode || "hybrid",
-    websiteUrl: cfg.websiteUrl,
-    themeColor: cfg.themeColor,
-    enableJs: cfg.enableJs,
-    enableFileUpload: cfg.enableFileUpload,
-    enableCamera: cfg.enableCamera,
-    enableMicrophone: cfg.enableMicrophone,
-    enableGeolocation: cfg.enableGeolocation,
-    orientation: cfg.orientation,
-    hasOffline: hasOffline,
-  }, null, 2)
-);
+// assets/config.json (only for WebView modes)
+if (!isNativeMode) {
+  fs.writeFileSync(path.join(assetsDir, "config.json"),
+    JSON.stringify({
+      appMode: cfg.appMode || "hybrid",
+      websiteUrl: cfg.websiteUrl,
+      themeColor: cfg.themeColor,
+      enableJs: cfg.enableJs,
+      enableFileUpload: cfg.enableFileUpload,
+      enableCamera: cfg.enableCamera,
+      enableMicrophone: cfg.enableMicrophone,
+      enableGeolocation: cfg.enableGeolocation,
+      orientation: cfg.orientation,
+      hasOffline: hasOffline,
+    }, null, 2)
+  );
+}
 
 // ═══════════════════════════════════════════════════════════════
-// MainActivity.kt — ONLY if not overridden by a module
+// MAINACTIVITY — Only write default if not overridden
 // ═══════════════════════════════════════════════════════════════
-if (!moduleOverridesMainActivity) {
-  const permsArrayKt = rp.length > 0 ? rp.map(p => `"${p}"`).join(", ") : "";
-  const hasOfflineStr = hasOffline ? "true" : "false";
-  const appMode = cfg.appMode || "hybrid";
-  const appModeStr = JSON.stringify(appMode);
+const permsArrayKt = rp.length > 0 ? rp.map(p => `"${p}"`).join(", ") : "";
+const hasOfflineStr = hasOffline ? "true" : "false";
+const appMode = cfg.appMode || "hybrid";
+const appModeStr = JSON.stringify(appMode);
 
-  const mainActivity =
+const mainActivity =
 `package ${cfg.packageName}
 
 import android.annotation.SuppressLint
@@ -688,7 +575,6 @@ class MainActivity : AppCompatActivity() {
     private val permissionRequestCode = 2001
 
     private val startupPermissions = arrayOf(${permsArrayKt})
-
     private val HAS_OFFLINE = ${hasOfflineStr}
     private val APP_MODE = ${appModeStr}
     private val LIVE_URL = "${cfg.websiteUrl}"
@@ -800,16 +686,14 @@ class MainActivity : AppCompatActivity() {
                 @Suppress("DEPRECATION")
                 cm.activeNetworkInfo?.isConnected == true
             }
-        } catch (e: Exception) {
-            false
-        }
+        } catch (e: Exception) { false }
     }
 
     private fun loadBestUrl() {
         val url: String? = when (APP_MODE) {
             "offline" -> if (HAS_OFFLINE) OFFLINE_URL else null
             "online" -> LIVE_URL
-            "hybrid" -> {
+            "hybrid", "native" -> {
                 if (isOnline()) LIVE_URL
                 else if (HAS_OFFLINE) OFFLINE_URL
                 else null
@@ -836,10 +720,7 @@ class MainActivity : AppCompatActivity() {
               body { font-family: sans-serif; text-align: center; padding: 40px 20px; color: #444; }
               h1 { font-size: 20px; }
               p { font-size: 14px; color: #666; }
-              button {
-                margin-top: 20px; padding: 12px 24px; font-size: 15px;
-                background: #1f6feb; color: white; border: none; border-radius: 8px;
-              }
+              button { margin-top: 20px; padding: 12px 24px; font-size: 15px; background: #1f6feb; color: white; border: none; border-radius: 8px; }
             </style></head>
             <body>
               <h1>📡 Content unavailable</h1>
@@ -887,15 +768,17 @@ class MainActivity : AppCompatActivity() {
     }
 }
 `;
-  fs.writeFileSync(path.join(javaDir, "MainActivity.kt"), mainActivity);
-  console.log("✓ Wrote default MainActivity.kt");
+
+if (skipDefaultMainActivity) {
+  console.log("⚑ Skipping default MainActivity.kt (native mode or module override)");
+  console.log("  - Custom module must provide MainActivity with launcher intent");
 } else {
-  console.log("⚑ Skipping default MainActivity.kt — module provides it");
+  fs.writeFileSync(path.join(javaDir, "MainActivity.kt"), mainActivity);
+  console.log("✓ Wrote default WebView MainActivity.kt");
 }
 
 console.log("✅ Android project generated at", ROOT);
-console.log("App mode:", cfg.appMode || "hybrid", "| hasOffline:", hasOffline);
-console.log("moduleOverridesMainActivity:", moduleOverridesMainActivity);
+console.log("App mode:", appMode, "| hasOffline:", hasOffline, "| skipMain:", skipDefaultMainActivity);
 
 // ═══════════════════════════════════════════════════════════════
 // HELPERS
@@ -920,14 +803,12 @@ function generateSolidPng(hex, size = 192) {
   ihdrData.writeUInt32BE(height, 4);
   ihdrData[8] = 8;
   ihdrData[9] = 6;
-  ihdrData[10] = 0; ihdrData[11] = 0; ihdrData[12] = 0;
   const ihdr = chunk("IHDR", ihdrData);
 
   const rowSize = 1 + width * 4;
   const raw = Buffer.alloc(rowSize * height);
   for (let y = 0; y < height; y++) {
     const off = y * rowSize;
-    raw[off] = 0;
     for (let x = 0; x < width; x++) {
       raw[off + 1 + x * 4] = r;
       raw[off + 2 + x * 4] = g;
@@ -937,7 +818,6 @@ function generateSolidPng(hex, size = 192) {
   }
   const idat = chunk("IDAT", deflateSync(raw));
   const iend = chunk("IEND", Buffer.alloc(0));
-
   return Buffer.concat([sig, ihdr, idat, iend]);
 
   function chunk(type, data) {
