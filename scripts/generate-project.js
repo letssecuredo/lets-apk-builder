@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-/* Generates a complete Android WebView project from config.json
- * Supports:
- *   - 40+ Android permissions (12 categories)
- *   - 4 app modes: offline | online | hybrid | native
- *   - Auto-flatten offline ZIP (finds index.html anywhere)
- *   - Module override for MainActivity (custom native apps)
- *   - Robust icon handling (ImageMagick normalize + fallback)
+/**
+ * Generates a complete Android project from config.json.
+ *
+ * Reads module-flags.json (written by install-custom-modules.js scan) and:
+ *   - Merges module deps into app/build.gradle
+ *   - Merges module manifest fragments into AndroidManifest.xml
+ *   - Skips default MainActivity if a module overrides it
  */
 const fs = require("fs");
 const path = require("path");
@@ -21,24 +21,37 @@ const resDir = path.join(ROOT, "app/src/main/res");
 const assetsDir = path.join(ROOT, "app/src/main/assets");
 
 // ═══════════════════════════════════════════════════════════════
-// MODE FLAGS (from install-custom-modules.js)
+// LOAD MODULE FLAGS
 // ═══════════════════════════════════════════════════════════════
-let moduleOverridesMainActivity = false;
-let moduleFlags = {};
+let moduleFlags = {
+  overrideMainActivity: false,
+  modules: [],
+  allDeps: [],
+  rootManifest: [],
+  appManifest: [],
+};
+
 try {
   const flagsPath = path.join(process.cwd(), "module-flags.json");
   if (fs.existsSync(flagsPath)) {
     moduleFlags = JSON.parse(fs.readFileSync(flagsPath, "utf8"));
-    moduleOverridesMainActivity = moduleFlags.overrideMainActivity === true;
-    console.log("Module flags:", JSON.stringify(moduleFlags));
+    console.log("✓ Loaded module-flags.json");
+    console.log("  overrideMainActivity:", moduleFlags.overrideMainActivity);
+    console.log("  deps:", (moduleFlags.allDeps || []).length);
+    console.log("  root manifest:", (moduleFlags.rootManifest || []).length);
+    console.log("  app manifest:", (moduleFlags.appManifest || []).length);
   } else {
-    console.log("No module-flags.json — using default MainActivity");
+    console.log("No module-flags.json — using defaults");
   }
 } catch (e) {
   console.warn("Failed to read module-flags.json:", e.message);
 }
 
-const isNativeMode = (cfg.appMode === "native");
+const moduleDeps = moduleFlags.allDeps || [];
+const moduleRootManifest = moduleFlags.rootManifest || [];
+const moduleAppManifest = moduleFlags.appManifest || [];
+const moduleOverridesMainActivity = moduleFlags.overrideMainActivity === true;
+const isNativeMode = cfg.appMode === "native";
 const skipDefaultMainActivity = isNativeMode || moduleOverridesMainActivity;
 
 console.log("appMode:", cfg.appMode);
@@ -65,7 +78,7 @@ for (const d of [
 ]) fs.mkdirSync(d, { recursive: true });
 
 // ═══════════════════════════════════════════════════════════════
-// OFFLINE ZIP — extract + auto-flatten
+// OFFLINE ZIP EXTRACTION
 // ═══════════════════════════════════════════════════════════════
 const offlineZipB64Path = path.join(process.cwd(), "offline.zip.b64");
 let hasOffline = false;
@@ -91,7 +104,6 @@ if (fs.existsSync(offlineZipB64Path)) {
         let entries;
         try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
         catch { return null; }
-
         for (const e of entries) {
           if (e.isFile() && e.name.toLowerCase() === "index.html") return dir;
         }
@@ -105,12 +117,10 @@ if (fs.existsSync(offlineZipB64Path)) {
       }
 
       const indexDir = findIndexHtml(tmpDir);
-
       if (!indexDir) {
         console.warn("⚠ No index.html found in ZIP");
       } else {
         console.log("Found index.html at:", indexDir);
-
         function copyRecursive(src, dest) {
           const entries = fs.readdirSync(src, { withFileTypes: true });
           for (const e of entries) {
@@ -124,7 +134,6 @@ if (fs.existsSync(offlineZipB64Path)) {
             }
           }
         }
-
         fs.rmSync(assetsDir, { recursive: true, force: true });
         fs.mkdirSync(assetsDir, { recursive: true });
         copyRecursive(indexDir, assetsDir);
@@ -143,12 +152,9 @@ if (fs.existsSync(offlineZipB64Path)) {
 
         if (fs.existsSync(path.join(assetsDir, "index.html"))) {
           hasOffline = true;
-          console.log("✓ Offline assets extracted and flattened to assets/");
-        } else {
-          console.warn("⚠ index.html still not at assets root");
+          console.log("✓ Offline assets extracted");
         }
       }
-
       fs.rmSync(tmpDir, { recursive: true, force: true });
     } catch (e) {
       console.warn("Offline ZIP extraction failed:", e.message);
@@ -193,10 +199,15 @@ const sdkDir = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT || "/usr
 fs.writeFileSync(path.join(ROOT, "local.properties"), `sdk.dir=${sdkDir}\n`);
 
 // ═══════════════════════════════════════════════════════════════
-// app/build.gradle
+// app/build.gradle — with module deps
 // ═══════════════════════════════════════════════════════════════
 const minSdk = 21;
 const targetSdk = 34;
+
+const moduleDepsBlock = moduleDeps.length > 0
+  ? `\n\n  // ─── Module dependencies ───\n  ${moduleDeps.join("\n  ")}`
+  : "";
+
 fs.writeFileSync(path.join(ROOT, "app/build.gradle"),
 `plugins {
   id 'com.android.application'
@@ -236,9 +247,13 @@ dependencies {
   implementation 'androidx.core:core-ktx:1.13.1'
   implementation 'androidx.appcompat:appcompat:1.7.0'
   implementation 'androidx.webkit:webkit:1.11.0'
-  implementation 'com.google.android.material:material:1.12.0'
+  implementation 'com.google.android.material:material:1.12.0'${moduleDepsBlock}
 }
 `);
+
+if (moduleDeps.length > 0) {
+  console.log(`✓ Added ${moduleDeps.length} module deps to app/build.gradle`);
+}
 
 fs.writeFileSync(path.join(ROOT, "app/proguard-rules.pro"),
 `-keep class ${cfg.packageName}.** { *; }
@@ -246,7 +261,7 @@ fs.writeFileSync(path.join(ROOT, "app/proguard-rules.pro"),
 `);
 
 // ═══════════════════════════════════════════════════════════════
-// MANIFEST
+// MANIFEST — base permissions
 // ═══════════════════════════════════════════════════════════════
 const mp = [];
 const mf = [];
@@ -387,21 +402,18 @@ if (cfg.enableFingerprint) {
   rp.push("android.permission.USE_FINGERPRINT");
 }
 
-console.log("Manifest permissions:", mp.length);
-console.log("Runtime permissions:", rp.length);
+console.log("Base manifest permissions:", mp.length);
+console.log("Base manifest features:", mf.length);
 
 const orientationAttr =
   cfg.orientation === "landscape" ? 'android:screenOrientation="landscape"'
   : cfg.orientation === "portrait" ? 'android:screenOrientation="portrait"'
   : 'android:screenOrientation="unspecified"';
 
-// ⭐ MainActivity launcher declaration
-// In native mode, the module provides its own launcher activity.
-// We DON'T declare WebView MainActivity as launcher.
+// Launcher activity
 let launcherBlock;
 if (skipDefaultMainActivity) {
-  // The module's manifest.xml will declare its own launcher activity
-  launcherBlock = `<!-- Launcher activity is provided by custom module -->`;
+  launcherBlock = `<!-- Launcher activity comes from custom module -->`;
 } else {
   launcherBlock = `
       <activity
@@ -417,9 +429,49 @@ if (skipDefaultMainActivity) {
       </activity>`;
 }
 
+// Merge root-level module manifest (uses-permission, uses-feature)
+// Dedupe against base
+const basePermNames = new Set();
+for (const p of mp) {
+  const m = p.match(/android:name="([^"]+)"/);
+  if (m) basePermNames.add(m[1]);
+}
+const baseFeatNames = new Set();
+for (const f of mf) {
+  const m = f.match(/android:name="([^"]+)"/);
+  if (m) baseFeatNames.add(m[1]);
+}
+
+const extraRoot = [];
+for (const elem of moduleRootManifest) {
+  const nameM = elem.match(/android:name="([^"]+)"/);
+  if (!nameM) { extraRoot.push(elem); continue; }
+  const name = nameM[1];
+  if (elem.startsWith("<uses-permission")) {
+    if (basePermNames.has(name)) continue;
+    basePermNames.add(name);
+    extraRoot.push(elem);
+  } else if (elem.startsWith("<uses-feature")) {
+    if (baseFeatNames.has(name)) continue;
+    baseFeatNames.add(name);
+    extraRoot.push(elem);
+  } else {
+    extraRoot.push(elem);
+  }
+}
+
+const rootManifestBlock = extraRoot.length > 0
+  ? "\n  " + extraRoot.join("\n  ")
+  : "";
+
+const appManifestBlock = moduleAppManifest.length > 0
+  ? "\n      " + moduleAppManifest.join("\n      ")
+  : "";
+
 const manifest =
 `<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+${rootManifestBlock}
 
   ${mp.join("\n  ")}
 
@@ -434,14 +486,32 @@ const manifest =
       android:usesCleartextTraffic="false"
       android:hardwareAccelerated="true"
       android:theme="@style/AppTheme">
-
       ${launcherBlock}
+${appManifestBlock}
   </application>
 </manifest>
 `;
 fs.writeFileSync(path.join(ROOT, "app/src/main/AndroidManifest.xml"), manifest);
 
-// res/values/strings.xml
+console.log(`✓ Manifest written`);
+console.log(`  Total permissions: ${mp.length + extraRoot.filter(e => e.startsWith("<uses-permission")).length}`);
+console.log(`  Total features: ${mf.length + extraRoot.filter(e => e.startsWith("<uses-feature")).length}`);
+console.log(`  App-level entries: ${moduleAppManifest.length}`);
+
+// Verify launcher exists when native/override mode
+if (skipDefaultMainActivity) {
+  const manifestContent = fs.readFileSync(path.join(ROOT, "app/src/main/AndroidManifest.xml"), "utf8");
+  if (!manifestContent.includes("android.intent.category.LAUNCHER")) {
+    console.error("❌ Native mode but NO LAUNCHER activity in manifest!");
+    console.error("   The module's manifest.xml must declare a launcher activity.");
+    process.exit(1);
+  }
+  console.log("✓ Launcher activity present");
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Resources
+// ═══════════════════════════════════════════════════════════════
 fs.writeFileSync(path.join(resDir, "values/strings.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <resources>
@@ -449,7 +519,6 @@ fs.writeFileSync(path.join(resDir, "values/strings.xml"),
 </resources>
 `);
 
-// res/values/colors.xml
 fs.writeFileSync(path.join(resDir, "values/colors.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <resources>
@@ -458,7 +527,6 @@ fs.writeFileSync(path.join(resDir, "values/colors.xml"),
 </resources>
 `);
 
-// res/values/styles.xml
 fs.writeFileSync(path.join(resDir, "values/styles.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <resources>
@@ -472,14 +540,11 @@ fs.writeFileSync(path.join(resDir, "values/styles.xml"),
 `);
 
 // ═══════════════════════════════════════════════════════════════
-// ICON HANDLING
+// ICONS
 // ═══════════════════════════════════════════════════════════════
 const iconSizes = {
-  "mipmap-mdpi": 48,
-  "mipmap-hdpi": 72,
-  "mipmap-xhdpi": 96,
-  "mipmap-xxhdpi": 144,
-  "mipmap-xxxhdpi": 192,
+  "mipmap-mdpi": 48, "mipmap-hdpi": 72, "mipmap-xhdpi": 96,
+  "mipmap-xxhdpi": 144, "mipmap-xxxhdpi": 192,
 };
 
 let userIconPath = null;
@@ -492,15 +557,11 @@ if (cfg.iconBase64) {
 }
 
 let magickOk = false;
-try {
-  execSync("which convert", { stdio: "pipe" });
-  magickOk = true;
-} catch { magickOk = false; }
+try { execSync("which convert", { stdio: "pipe" }); magickOk = true; } catch { magickOk = false; }
 
 for (const [dir, size] of Object.entries(iconSizes)) {
   const dest = path.join(resDir, dir, "ic_launcher.png");
   let done = false;
-
   if (userIconPath && magickOk) {
     try {
       execSync(
@@ -510,19 +571,16 @@ for (const [dir, size] of Object.entries(iconSizes)) {
         { stdio: "pipe" }
       );
       done = true;
-      console.log(`✓ Icon ${dir} (${size}x${size})`);
-    } catch (e) {
-      console.warn(`Icon ${dir} failed: ${e.message}`);
-    }
+    } catch (e) { console.warn(`Icon ${dir} failed: ${e.message}`); }
   }
-  if (!done) {
-    fs.writeFileSync(dest, generateSolidPng(cfg.themeColor, size));
-  }
+  if (!done) fs.writeFileSync(dest, generateSolidPng(cfg.themeColor, size));
 }
 
 if (userIconPath && fs.existsSync(userIconPath)) fs.unlinkSync(userIconPath);
 
-// assets/config.json (only for WebView modes)
+// ═══════════════════════════════════════════════════════════════
+// config.json (only for WebView mode)
+// ═══════════════════════════════════════════════════════════════
 if (!isNativeMode) {
   fs.writeFileSync(path.join(assetsDir, "config.json"),
     JSON.stringify({
@@ -541,7 +599,7 @@ if (!isNativeMode) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// MAINACTIVITY — Only write default if not overridden
+// MainActivity (WebView version — only if not skipped)
 // ═══════════════════════════════════════════════════════════════
 const permsArrayKt = rp.length > 0 ? rp.map(p => `"${p}"`).join(", ") : "";
 const hasOfflineStr = hasOffline ? "true" : "false";
@@ -693,11 +751,6 @@ class MainActivity : AppCompatActivity() {
         val url: String? = when (APP_MODE) {
             "offline" -> if (HAS_OFFLINE) OFFLINE_URL else null
             "online" -> LIVE_URL
-            "hybrid", "native" -> {
-                if (isOnline()) LIVE_URL
-                else if (HAS_OFFLINE) OFFLINE_URL
-                else null
-            }
             else -> {
                 if (isOnline()) LIVE_URL
                 else if (HAS_OFFLINE) OFFLINE_URL
@@ -705,11 +758,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        if (url != null) {
-            webView.loadUrl(url)
-        } else {
-            webView.loadDataWithBaseURL(null, noInternetHtml(), "text/html", "UTF-8", null)
-        }
+        if (url != null) webView.loadUrl(url)
+        else webView.loadDataWithBaseURL(null, noInternetHtml(), "text/html", "UTF-8", null)
     }
 
     private fun noInternetHtml(): String {
@@ -771,7 +821,6 @@ class MainActivity : AppCompatActivity() {
 
 if (skipDefaultMainActivity) {
   console.log("⚑ Skipping default MainActivity.kt (native mode or module override)");
-  console.log("  - Custom module must provide MainActivity with launcher intent");
 } else {
   fs.writeFileSync(path.join(javaDir, "MainActivity.kt"), mainActivity);
   console.log("✓ Wrote default WebView MainActivity.kt");
