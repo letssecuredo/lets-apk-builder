@@ -5,6 +5,7 @@
  *   - 3 app modes: offline | online | hybrid
  *   - Auto-flatten offline ZIP (finds index.html anywhere in the archive)
  *   - Robust icon handling (ImageMagick normalize + fallback)
+ *   - Custom module MainActivity override
  */
 const fs = require("fs");
 const path = require("path");
@@ -19,6 +20,26 @@ const javaDir = path.join(ROOT, "app/src/main/java", pkgPath);
 const resDir = path.join(ROOT, "app/src/main/res");
 const assetsDir = path.join(ROOT, "app/src/main/assets");
 
+// ═══════════════════════════════════════════════════════════════
+// CHECK: Did any custom module override MainActivity?
+// (install-custom-modules.js writes module-flags.json)
+// ═══════════════════════════════════════════════════════════════
+let moduleOverridesMainActivity = false;
+let moduleProvidesFileShareHtml = false;
+try {
+  const flagsPath = path.join(process.cwd(), "module-flags.json");
+  if (fs.existsSync(flagsPath)) {
+    const flags = JSON.parse(fs.readFileSync(flagsPath, "utf8"));
+    moduleOverridesMainActivity = flags.overrideMainActivity === true;
+    moduleProvidesFileShareHtml = flags.providesFileShareHtml === true;
+    console.log("📋 Module flags loaded:", flags);
+  } else {
+    console.log("📋 No module flags (using default MainActivity)");
+  }
+} catch (e) {
+  console.warn("⚠️ Failed to read module-flags.json:", e.message);
+}
+
 // Clean
 fs.rmSync(ROOT, { recursive: true, force: true });
 
@@ -27,6 +48,8 @@ for (const d of [
   javaDir,
   path.join(resDir, "values"),
   path.join(resDir, "xml"),
+  path.join(resDir, "layout"),
+  path.join(resDir, "drawable"),
   path.join(resDir, "mipmap-hdpi"),
   path.join(resDir, "mipmap-mdpi"),
   path.join(resDir, "mipmap-xhdpi"),
@@ -36,7 +59,7 @@ for (const d of [
 ]) fs.mkdirSync(d, { recursive: true });
 
 // ═══════════════════════════════════════════════════════════════
-// OFFLINE ZIP — extract + auto-flatten (finds index.html anywhere)
+// OFFLINE ZIP — extract + auto-flatten
 // ═══════════════════════════════════════════════════════════════
 const offlineZipB64Path = path.join(process.cwd(), "offline.zip.b64");
 let hasOffline = false;
@@ -50,7 +73,6 @@ if (fs.existsSync(offlineZipB64Path)) {
       fs.writeFileSync(zipPath, zipBuffer);
       console.log("Extracting offline ZIP:", zipBuffer.length, "bytes");
 
-      // Extract to a temporary folder
       const tmpDir = path.join(process.cwd(), "offline-extracted");
       fs.rmSync(tmpDir, { recursive: true, force: true });
       fs.mkdirSync(tmpDir, { recursive: true });
@@ -58,7 +80,7 @@ if (fs.existsSync(offlineZipB64Path)) {
       execSync(`unzip -q -o "${zipPath}" -d "${tmpDir}"`, { stdio: "inherit" });
       fs.unlinkSync(zipPath);
 
-      // ── findIndexHtml: recursively locate the folder containing index.html ──
+      // Recursively locate the folder containing index.html
       function findIndexHtml(dir, depth = 0) {
         if (depth > 6) return null;
         let entries;
@@ -68,14 +90,12 @@ if (fs.existsSync(offlineZipB64Path)) {
           return null;
         }
 
-        // Check for index.html in this exact directory
         for (const e of entries) {
           if (e.isFile() && e.name.toLowerCase() === "index.html") {
             return dir;
           }
         }
 
-        // Recurse into subdirectories (skip __MACOSX and hidden folders)
         for (const e of entries) {
           if (
             e.isDirectory() &&
@@ -96,7 +116,6 @@ if (fs.existsSync(offlineZipB64Path)) {
       } else {
         console.log("Found index.html at:", indexDir);
 
-        // Copy everything from indexDir into assetsDir
         function copyRecursive(src, dest) {
           const entries = fs.readdirSync(src, { withFileTypes: true });
           for (const e of entries) {
@@ -111,13 +130,20 @@ if (fs.existsSync(offlineZipB64Path)) {
           }
         }
 
-        // Clean assetsDir first
-        fs.rmSync(assetsDir, { recursive: true, force: true });
-        fs.mkdirSync(assetsDir, { recursive: true });
+        // NOTE: Don't delete assetsDir if module already provided file-share.html
+        // Since module flags load first, module files are already in place
+        // We need to MERGE instead of replace if module has files
+        if (moduleProvidesFileShareHtml) {
+          // Merge mode: copy without deleting
+          console.log("Merging offline assets (module files preserved)");
+          copyRecursive(indexDir, assetsDir);
+        } else {
+          // Replace mode
+          fs.rmSync(assetsDir, { recursive: true, force: true });
+          fs.mkdirSync(assetsDir, { recursive: true });
+          copyRecursive(indexDir, assetsDir);
+        }
 
-        copyRecursive(indexDir, assetsDir);
-
-        // Remove junk files/dirs
         function cleanJunk(dir) {
           if (!fs.existsSync(dir)) return;
           for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -136,7 +162,6 @@ if (fs.existsSync(offlineZipB64Path)) {
         }
         cleanJunk(assetsDir);
 
-        // Verify
         const rootIndex = path.join(assetsDir, "index.html");
         if (fs.existsSync(rootIndex)) {
           hasOffline = true;
@@ -148,7 +173,6 @@ if (fs.existsSync(offlineZipB64Path)) {
         }
       }
 
-      // Cleanup temp folder
       fs.rmSync(tmpDir, { recursive: true, force: true });
 
     } catch (e) {
@@ -204,6 +228,24 @@ fs.writeFileSync(path.join(ROOT, "local.properties"), `sdk.dir=${sdkDir}\n`);
 // ═══════════════════════════════════════════════════════════════
 const minSdk = 21;
 const targetSdk = 34;
+
+// Load custom module dependencies (if any)
+let customDeps = [];
+try {
+  const customDepsPath = path.join(process.cwd(), "custom-modules.deps.json");
+  if (fs.existsSync(customDepsPath)) {
+    const data = JSON.parse(fs.readFileSync(customDepsPath, "utf8"));
+    customDeps = data.dependencies || [];
+    console.log(`Custom module deps: ${customDeps.length}`);
+  }
+} catch (e) {
+  console.warn("Custom deps load failed:", e.message);
+}
+
+const customDepsBlock = customDeps.length > 0
+  ? `\n  // ═══ Custom module dependencies ═══\n  ${customDeps.join("\n  ")}`
+  : "";
+
 fs.writeFileSync(path.join(ROOT, "app/build.gradle"),
 `plugins {
   id 'com.android.application'
@@ -243,7 +285,7 @@ dependencies {
   implementation 'androidx.core:core-ktx:1.13.1'
   implementation 'androidx.appcompat:appcompat:1.7.0'
   implementation 'androidx.webkit:webkit:1.11.0'
-  implementation 'com.google.android.material:material:1.12.0'
+  implementation 'com.google.android.material:material:1.12.0'${customDepsBlock}
 }
 `);
 
@@ -261,11 +303,9 @@ const rp = []; // runtime permissions
 
 mp.push(`<uses-permission android:name="android.permission.INTERNET" />`);
 
-// Network
 if (cfg.enableNetworkState) mp.push(`<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />`);
 if (cfg.enableChangeNetwork) mp.push(`<uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />`);
 
-// Camera
 if (cfg.enableCamera) {
   mp.push(`<uses-permission android:name="android.permission.CAMERA" />`);
   mf.push(`<uses-feature android:name="android.hardware.camera" android:required="false" />`);
@@ -273,17 +313,14 @@ if (cfg.enableCamera) {
   rp.push("android.permission.CAMERA");
 }
 
-// Microphone
 if (cfg.enableMicrophone) {
   mp.push(`<uses-permission android:name="android.permission.RECORD_AUDIO" />`);
   mf.push(`<uses-feature android:name="android.hardware.microphone" android:required="false" />`);
   rp.push("android.permission.RECORD_AUDIO");
 }
 
-// Audio settings
 if (cfg.enableAudioSettings) mp.push(`<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />`);
 
-// Location
 if (cfg.enableGeolocation) {
   mp.push(`<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />`);
   rp.push("android.permission.ACCESS_FINE_LOCATION");
@@ -300,7 +337,6 @@ if (cfg.enableGeolocation || cfg.enableCoarseLocation || cfg.enableBackgroundLoc
   mf.push(`<uses-feature android:name="android.hardware.location.gps" android:required="false" />`);
 }
 
-// Storage
 if (cfg.enableReadMediaImages) {
   mp.push(`<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />`);
   rp.push("android.permission.READ_MEDIA_IMAGES");
@@ -319,7 +355,6 @@ if (cfg.enableStorage || cfg.enableFileUpload) {
   rp.push("android.permission.READ_EXTERNAL_STORAGE");
 }
 
-// Bluetooth
 if (cfg.enableBluetooth) {
   mp.push(`<uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />`);
   mp.push(`<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />`);
@@ -333,44 +368,32 @@ if (cfg.enableBluetoothLegacy) {
   mp.push(`<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />`);
 }
 
-// NFC
 if (cfg.enableNfc) {
   mp.push(`<uses-permission android:name="android.permission.NFC" />`);
   mf.push(`<uses-feature android:name="android.hardware.nfc" android:required="false" />`);
 }
 
-// Nearby WiFi
 if (cfg.enableNearbyWifi) {
   mp.push(`<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" />`);
   rp.push("android.permission.NEARBY_WIFI_DEVICES");
 }
 
-// WiFi
 if (cfg.enableWifi) mp.push(`<uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />`);
 if (cfg.enableChangeWifi) mp.push(`<uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />`);
 
-// Vibration
 if (cfg.enableVibration) mp.push(`<uses-permission android:name="android.permission.VIBRATE" />`);
-
-// Wake lock
 if (cfg.enableWakeLock) mp.push(`<uses-permission android:name="android.permission.WAKE_LOCK" />`);
-
-// Flashlight
 if (cfg.enableFlashlight) mf.push(`<uses-feature android:name="android.hardware.camera.flash" android:required="false" />`);
 
-// Body sensors
 if (cfg.enableBodySensors) {
   mp.push(`<uses-permission android:name="android.permission.BODY_SENSORS" />`);
   rp.push("android.permission.BODY_SENSORS");
 }
-
-// Activity recognition
 if (cfg.enableActivityRecognition) {
   mp.push(`<uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />`);
   rp.push("android.permission.ACTIVITY_RECOGNITION");
 }
 
-// Phone
 if (cfg.enableReadPhoneState) {
   mp.push(`<uses-permission android:name="android.permission.READ_PHONE_STATE" />`);
   rp.push("android.permission.READ_PHONE_STATE");
@@ -380,7 +403,6 @@ if (cfg.enableCallPhone) {
   rp.push("android.permission.CALL_PHONE");
 }
 
-// Contacts
 if (cfg.enableReadContacts) {
   mp.push(`<uses-permission android:name="android.permission.READ_CONTACTS" />`);
   rp.push("android.permission.READ_CONTACTS");
@@ -389,14 +411,11 @@ if (cfg.enableWriteContacts) {
   mp.push(`<uses-permission android:name="android.permission.WRITE_CONTACTS" />`);
   rp.push("android.permission.WRITE_CONTACTS");
 }
-
-// Accounts
 if (cfg.enableGetAccounts) {
   mp.push(`<uses-permission android:name="android.permission.GET_ACCOUNTS" />`);
   rp.push("android.permission.GET_ACCOUNTS");
 }
 
-// SMS
 if (cfg.enableSendSms) {
   mp.push(`<uses-permission android:name="android.permission.SEND_SMS" />`);
   rp.push("android.permission.SEND_SMS");
@@ -410,7 +429,6 @@ if (cfg.enableReadSms) {
   rp.push("android.permission.READ_SMS");
 }
 
-// Calendar
 if (cfg.enableReadCalendar) {
   mp.push(`<uses-permission android:name="android.permission.READ_CALENDAR" />`);
   rp.push("android.permission.READ_CALENDAR");
@@ -420,28 +438,16 @@ if (cfg.enableWriteCalendar) {
   rp.push("android.permission.WRITE_CALENDAR");
 }
 
-// Notifications
 if (cfg.enableNotifications) {
   mp.push(`<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />`);
   rp.push("android.permission.POST_NOTIFICATIONS");
 }
-
-// Foreground service
 if (cfg.enableForegroundService) mp.push(`<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />`);
-
-// Boot
 if (cfg.enableBootCompleted) mp.push(`<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />`);
-
-// Shortcut
 if (cfg.enableInstallShortcut) mp.push(`<uses-permission android:name="android.permission.INSTALL_SHORTCUT" />`);
-
-// System alert window
 if (cfg.enableSystemAlertWindow) mp.push(`<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />`);
-
-// Install packages
 if (cfg.enableInstallPackages) mp.push(`<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />`);
 
-// Biometric
 if (cfg.enableBiometric) {
   mp.push(`<uses-permission android:name="android.permission.USE_BIOMETRIC" />`);
   rp.push("android.permission.USE_BIOMETRIC");
@@ -454,31 +460,35 @@ if (cfg.enableFingerprint) {
 console.log("Manifest permissions:", mp.length);
 console.log("Runtime permissions:", rp.length);
 
+// ═══════════════════════════════════════════════════════════════
+// CUSTOM MODULE MANIFEST FRAGMENTS
+// ═══════════════════════════════════════════════════════════════
+let customManifestBlock = "";
+try {
+  const customDepsPath = path.join(process.cwd(), "custom-modules.deps.json");
+  if (fs.existsSync(customDepsPath)) {
+    const data = JSON.parse(fs.readFileSync(customDepsPath, "utf8"));
+    const fragments = data.manifestFragments || [];
+    if (fragments.length > 0) {
+      customManifestBlock = "\n  <!-- Custom module manifest -->\n  " +
+        fragments.join("\n  ");
+      console.log(`Custom manifest fragments: ${fragments.length}`);
+    }
+  }
+} catch (e) {
+  console.warn("Custom manifest load failed:", e.message);
+}
+
 const orientationAttr =
   cfg.orientation === "landscape" ? 'android:screenOrientation="landscape"'
   : cfg.orientation === "portrait" ? 'android:screenOrientation="portrait"'
   : 'android:screenOrientation="unspecified"';
 
-const manifest =
-`<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
-  ${mp.join("\n  ")}
-
-  ${mf.join("\n  ")}
-
-  <application
-      android:allowBackup="true"
-      android:icon="@mipmap/ic_launcher"
-      android:label="@string/app_name"
-      android:roundIcon="@mipmap/ic_launcher"
-      android:supportsRtl="true"
-      android:usesCleartextTraffic="false"
-      android:hardwareAccelerated="true"
-      android:networkSecurityConfig="@xml/network_security_config"
-      android:theme="@style/AppTheme">
-
-      <activity
+// ⚠️ If module overrides MainActivity, don't declare it here
+// The module's manifest.xml should declare it as launcher
+const defaultLauncherActivity = moduleOverridesMainActivity
+  ? "" // module provides its own launcher
+  : `<activity
           android:name=".MainActivity"
           android:exported="true"
           android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"
@@ -488,7 +498,29 @@ const manifest =
               <action android:name="android.intent.action.MAIN" />
               <category android:name="android.intent.category.LAUNCHER" />
           </intent-filter>
-      </activity>
+      </activity>`;
+
+const manifest =
+`<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+  ${mp.join("\n  ")}
+
+  ${mf.join("\n  ")}
+  ${customManifestBlock}
+
+  <application
+      android:allowBackup="true"
+      android:icon="@mipmap/ic_launcher"
+      android:label="@string/app_name"
+      android:roundIcon="@mipmap/ic_launcher"
+      android:supportsRtl="true"
+      android:usesCleartextTraffic="true"
+      android:hardwareAccelerated="true"
+      android:networkSecurityConfig="@xml/network_security_config"
+      android:theme="@style/AppTheme">
+
+      ${defaultLauncherActivity}
   </application>
 </manifest>
 `;
@@ -528,7 +560,7 @@ fs.writeFileSync(path.join(resDir, "values/styles.xml"),
 fs.writeFileSync(path.join(resDir, "xml/network_security_config.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-  <base-config cleartextTrafficPermitted="false">
+  <base-config cleartextTrafficPermitted="true">
     <trust-anchors>
       <certificates src="system" />
     </trust-anchors>
@@ -621,14 +653,15 @@ fs.writeFileSync(path.join(assetsDir, "config.json"),
 );
 
 // ═══════════════════════════════════════════════════════════════
-// MainActivity.kt — 3-mode routing (offline / online / hybrid)
+// MainActivity.kt — ONLY if not overridden by a module
 // ═══════════════════════════════════════════════════════════════
-const permsArrayKt = rp.length > 0 ? rp.map(p => `"${p}"`).join(", ") : "";
-const hasOfflineStr = hasOffline ? "true" : "false";
-const appMode = cfg.appMode || "hybrid";
-const appModeStr = JSON.stringify(appMode);
+if (!moduleOverridesMainActivity) {
+  const permsArrayKt = rp.length > 0 ? rp.map(p => `"${p}"`).join(", ") : "";
+  const hasOfflineStr = hasOffline ? "true" : "false";
+  const appMode = cfg.appMode || "hybrid";
+  const appModeStr = JSON.stringify(appMode);
 
-const mainActivity =
+  const mainActivity =
 `package ${cfg.packageName}
 
 import android.annotation.SuppressLint
@@ -656,7 +689,6 @@ class MainActivity : AppCompatActivity() {
 
     private val startupPermissions = arrayOf(${permsArrayKt})
 
-    // Build-time constants
     private val HAS_OFFLINE = ${hasOfflineStr}
     private val APP_MODE = ${appModeStr}
     private val LIVE_URL = "${cfg.websiteUrl}"
@@ -775,12 +807,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadBestUrl() {
         val url: String? = when (APP_MODE) {
-            "offline" -> {
-                if (HAS_OFFLINE) OFFLINE_URL else null
-            }
-            "online" -> {
-                LIVE_URL
-            }
+            "offline" -> if (HAS_OFFLINE) OFFLINE_URL else null
+            "online" -> LIVE_URL
             "hybrid" -> {
                 if (isOnline()) LIVE_URL
                 else if (HAS_OFFLINE) OFFLINE_URL
@@ -796,13 +824,7 @@ class MainActivity : AppCompatActivity() {
         if (url != null) {
             webView.loadUrl(url)
         } else {
-            webView.loadDataWithBaseURL(
-                null,
-                noInternetHtml(),
-                "text/html",
-                "UTF-8",
-                null
-            )
+            webView.loadDataWithBaseURL(null, noInternetHtml(), "text/html", "UTF-8", null)
         }
     }
 
@@ -865,10 +887,15 @@ class MainActivity : AppCompatActivity() {
     }
 }
 `;
-fs.writeFileSync(path.join(javaDir, "MainActivity.kt"), mainActivity);
+  fs.writeFileSync(path.join(javaDir, "MainActivity.kt"), mainActivity);
+  console.log("✓ Wrote default MainActivity.kt");
+} else {
+  console.log("⚑ Skipping default MainActivity.kt — module provides it");
+}
 
 console.log("✅ Android project generated at", ROOT);
-console.log("App mode:", appMode, "| hasOffline:", hasOffline);
+console.log("App mode:", cfg.appMode || "hybrid", "| hasOffline:", hasOffline);
+console.log("moduleOverridesMainActivity:", moduleOverridesMainActivity);
 
 // ═══════════════════════════════════════════════════════════════
 // HELPERS
