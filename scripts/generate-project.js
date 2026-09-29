@@ -34,17 +34,23 @@ let moduleFlags = {
 try {
   const flagsPath = path.join(process.cwd(), "module-flags.json");
   if (fs.existsSync(flagsPath)) {
-    moduleFlags = JSON.parse(fs.readFileSync(flagsPath, "utf8"));
+    const raw = fs.readFileSync(flagsPath, "utf8");
+    moduleFlags = JSON.parse(raw);
     console.log("✓ Loaded module-flags.json");
     console.log("  overrideMainActivity:", moduleFlags.overrideMainActivity);
+    console.log("  modules:", (moduleFlags.modules || []).length);
     console.log("  deps:", (moduleFlags.allDeps || []).length);
     console.log("  root manifest:", (moduleFlags.rootManifest || []).length);
     console.log("  app manifest:", (moduleFlags.appManifest || []).length);
+    if (moduleFlags.allDeps && moduleFlags.allDeps.length > 0) {
+      console.log("  Deps list:");
+      for (const d of moduleFlags.allDeps) console.log("    • " + d);
+    }
   } else {
-    console.log("No module-flags.json — using defaults");
+    console.log("⚠ No module-flags.json — using defaults");
   }
 } catch (e) {
-  console.warn("Failed to read module-flags.json:", e.message);
+  console.warn("✗ Failed to read module-flags.json:", e.message);
 }
 
 const moduleDeps = moduleFlags.allDeps || [];
@@ -54,10 +60,12 @@ const moduleOverridesMainActivity = moduleFlags.overrideMainActivity === true;
 const isNativeMode = cfg.appMode === "native";
 const skipDefaultMainActivity = isNativeMode || moduleOverridesMainActivity;
 
+console.log("───────────────────────────────");
 console.log("appMode:", cfg.appMode);
 console.log("isNativeMode:", isNativeMode);
 console.log("moduleOverridesMainActivity:", moduleOverridesMainActivity);
 console.log("skipDefaultMainActivity:", skipDefaultMainActivity);
+console.log("───────────────────────────────");
 
 // Clean
 fs.rmSync(ROOT, { recursive: true, force: true });
@@ -173,7 +181,6 @@ fs.writeFileSync(path.join(ROOT, "build.gradle"),
 }
 `);
 
-// settings.gradle
 fs.writeFileSync(path.join(ROOT, "settings.gradle"),
 `pluginManagement {
   repositories { google(); mavenCentral(); gradlePluginPortal() }
@@ -186,7 +193,6 @@ rootProject.name = "LetsApkBuilder"
 include ':app'
 `);
 
-// gradle.properties
 fs.writeFileSync(path.join(ROOT, "gradle.properties"),
 `org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
 android.useAndroidX=true
@@ -194,12 +200,11 @@ android.nonTransitiveRClass=true
 kotlin.code.style=official
 `);
 
-// local.properties
 const sdkDir = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT || "/usr/local/lib/android/sdk";
 fs.writeFileSync(path.join(ROOT, "local.properties"), `sdk.dir=${sdkDir}\n`);
 
 // ═══════════════════════════════════════════════════════════════
-// app/build.gradle — with module deps
+// app/build.gradle — WITH MODULE DEPS
 // ═══════════════════════════════════════════════════════════════
 const minSdk = 21;
 const targetSdk = 34;
@@ -253,6 +258,8 @@ dependencies {
 
 if (moduleDeps.length > 0) {
   console.log(`✓ Added ${moduleDeps.length} module deps to app/build.gradle`);
+} else {
+  console.log("⚠ No module deps to add");
 }
 
 fs.writeFileSync(path.join(ROOT, "app/proguard-rules.pro"),
@@ -261,7 +268,7 @@ fs.writeFileSync(path.join(ROOT, "app/proguard-rules.pro"),
 `);
 
 // ═══════════════════════════════════════════════════════════════
-// MANIFEST — base permissions
+// MANIFEST
 // ═══════════════════════════════════════════════════════════════
 const mp = [];
 const mf = [];
@@ -410,7 +417,6 @@ const orientationAttr =
   : cfg.orientation === "portrait" ? 'android:screenOrientation="portrait"'
   : 'android:screenOrientation="unspecified"';
 
-// Launcher activity
 let launcherBlock;
 if (skipDefaultMainActivity) {
   launcherBlock = `<!-- Launcher activity comes from custom module -->`;
@@ -429,8 +435,7 @@ if (skipDefaultMainActivity) {
       </activity>`;
 }
 
-// Merge root-level module manifest (uses-permission, uses-feature)
-// Dedupe against base
+// Dedupe module manifest vs base
 const basePermNames = new Set();
 for (const p of mp) {
   const m = p.match(/android:name="([^"]+)"/);
@@ -498,20 +503,16 @@ console.log(`  Total permissions: ${mp.length + extraRoot.filter(e => e.startsWi
 console.log(`  Total features: ${mf.length + extraRoot.filter(e => e.startsWith("<uses-feature")).length}`);
 console.log(`  App-level entries: ${moduleAppManifest.length}`);
 
-// Verify launcher exists when native/override mode
 if (skipDefaultMainActivity) {
   const manifestContent = fs.readFileSync(path.join(ROOT, "app/src/main/AndroidManifest.xml"), "utf8");
   if (!manifestContent.includes("android.intent.category.LAUNCHER")) {
     console.error("❌ Native mode but NO LAUNCHER activity in manifest!");
-    console.error("   The module's manifest.xml must declare a launcher activity.");
     process.exit(1);
   }
   console.log("✓ Launcher activity present");
 }
 
-// ═══════════════════════════════════════════════════════════════
 // Resources
-// ═══════════════════════════════════════════════════════════════
 fs.writeFileSync(path.join(resDir, "values/strings.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <resources>
@@ -539,9 +540,7 @@ fs.writeFileSync(path.join(resDir, "values/styles.xml"),
 </resources>
 `);
 
-// ═══════════════════════════════════════════════════════════════
-// ICONS
-// ═══════════════════════════════════════════════════════════════
+// Icons
 const iconSizes = {
   "mipmap-mdpi": 48, "mipmap-hdpi": 72, "mipmap-xhdpi": 96,
   "mipmap-xxhdpi": 144, "mipmap-xxxhdpi": 192,
@@ -578,9 +577,7 @@ for (const [dir, size] of Object.entries(iconSizes)) {
 
 if (userIconPath && fs.existsSync(userIconPath)) fs.unlinkSync(userIconPath);
 
-// ═══════════════════════════════════════════════════════════════
-// config.json (only for WebView mode)
-// ═══════════════════════════════════════════════════════════════
+// config.json
 if (!isNativeMode) {
   fs.writeFileSync(path.join(assetsDir, "config.json"),
     JSON.stringify({
@@ -598,9 +595,7 @@ if (!isNativeMode) {
   );
 }
 
-// ═══════════════════════════════════════════════════════════════
-// MainActivity (WebView version — only if not skipped)
-// ═══════════════════════════════════════════════════════════════
+// MainActivity
 const permsArrayKt = rp.length > 0 ? rp.map(p => `"${p}"`).join(", ") : "";
 const hasOfflineStr = hasOffline ? "true" : "false";
 const appMode = cfg.appMode || "hybrid";
@@ -829,9 +824,7 @@ if (skipDefaultMainActivity) {
 console.log("✅ Android project generated at", ROOT);
 console.log("App mode:", appMode, "| hasOffline:", hasOffline, "| skipMain:", skipDefaultMainActivity);
 
-// ═══════════════════════════════════════════════════════════════
 // HELPERS
-// ═══════════════════════════════════════════════════════════════
 function escapeXml(s) {
   return String(s).replace(/[<>&'"]/g, (c) => ({
     "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;"
