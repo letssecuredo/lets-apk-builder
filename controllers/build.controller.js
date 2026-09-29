@@ -1,87 +1,179 @@
 const { v4: uuidv4 } = require("uuid");
 const {
-  newBuildRecord, saveBuild, getBuild, listBuilds, saveZipChunks, getZipChunks,
+  newBuildRecord, saveBuild, getBuild, listBuilds,
+  saveZipChunks, getZipChunks,
 } = require("../services/buildService");
+const {
+  saveModuleChunks, getModuleChunks, listBuildModules,
+} = require("../services/moduleService");
 const { triggerBuildWorkflow } = require("../services/githubService");
 const { record } = require("../services/auditService");
 const logger = require("../utils/logger");
 
+// ═══════════════════════════════════════════════════════════════
+// CREATE BUILD
+// ═══════════════════════════════════════════════════════════════
 async function createBuild(req, res, next) {
   try {
     const config = req.validatedConfig;
     const buildId = uuidv4();
 
-    // Pull ZIP base64 out of config — never store it in the main doc
+    // ─── Pull offline ZIP out of config (stored separately) ───
     const offlineZipBase64 = config.offlineZipBase64 || null;
     const offlineZipName = config.offlineZipName || null;
     const offlineZipSize = config.offlineZipSize || 0;
     delete config.offlineZipBase64;
 
+    // ─── Pull custom modules out of config (admin-only) ───
+    const modules = Array.isArray(config.modules) ? config.modules : [];
+    delete config.modules;
+
+    // ⭐ SECURITY: Custom modules require admin
+    const isAdmin = !!(req.admin && req.admin.role === "admin");
+    if (modules.length > 0 && !isAdmin) {
+      logger.warn("non-admin attempted custom modules", {
+        ip: req.ip,
+        moduleCount: modules.length,
+      });
+      return res.status(403).json({
+        error: "Custom modules require admin access. Please log in at /admin-login.html.",
+        code: "ADMIN_REQUIRED",
+      });
+    }
+
+    // ─── Save build record ───
     const record_ = newBuildRecord({ id: buildId, config, userId: req.user?.uid });
     await saveBuild(record_);
 
-    // Save ZIP in chunks if present
+    // ─── Save offline ZIP (chunked) ───
     if (offlineZipBase64) {
       try {
         await saveZipChunks(buildId, offlineZipBase64, offlineZipName, offlineZipSize);
+        logger.info("offline ZIP saved", buildId, `${Math.round(offlineZipSize / 1024)} KB`);
       } catch (zipErr) {
-        logger.error("ZIP chunk save failed", zipErr.message);
+        logger.error("offline ZIP chunk save failed", buildId, zipErr.message);
+        // Non-fatal — build can still work without offline
       }
     }
 
+    // ─── Save each custom module (chunked) ───
+    if (modules.length > 0) {
+      for (const mod of modules) {
+        try {
+          await saveModuleChunks(buildId, mod.id, mod.base64, mod.name, mod.size);
+          logger.info("module saved", buildId, mod.id, `${Math.round(mod.size / 1024)} KB`);
+        } catch (modErr) {
+          logger.error("module chunk save failed", buildId, mod.id, modErr.message);
+          // Non-fatal — skip this module, build continues
+        }
+      }
+    }
+
+    // ─── Trigger GitHub Actions workflow ───
     try {
       await triggerBuildWorkflow(buildId, config);
     } catch (triggerErr) {
       await saveBuild({
-        id: buildId, status: "failed", error: triggerErr.message,
+        id: buildId,
+        status: "failed",
+        error: triggerErr.message,
         updatedAt: new Date().toISOString(),
       });
       throw triggerErr;
     }
 
-    await record("build.created", { buildId, ip: req.ip });
-    logger.info("build created", buildId);
+    // ─── Audit + response ───
+    await record("build.created", {
+      buildId,
+      ip: req.ip,
+      moduleCount: modules.length,
+      hasOfflineZip: !!offlineZipBase64,
+      isAdmin,
+    });
+    logger.info("build created", buildId, {
+      modules: modules.length,
+      offline: !!offlineZipBase64,
+      isAdmin,
+    });
+
     res.status(201).json({ buildId, status: "queued" });
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// GET BUILD BY ID
+// ═══════════════════════════════════════════════════════════════
 async function getBuildById(req, res, next) {
   try {
     const build = await getBuild(req.params.id);
     if (!build) return res.status(404).json({ error: "Build not found" });
-    if (process.env.JWT_ENABLED === "true" && build.userId && req.user?.uid && build.userId !== req.user.uid) {
+
+    if (
+      process.env.JWT_ENABLED === "true" &&
+      build.userId &&
+      req.user?.uid &&
+      build.userId !== req.user.uid
+    ) {
       return res.status(403).json({ error: "Forbidden" });
     }
+
     const { config, ...safe } = build;
     res.json({ ...safe, config: { ...config, iconBase64: undefined } });
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// LIST BUILDS
+// ═══════════════════════════════════════════════════════════════
 async function listBuildsHandler(req, res, next) {
   try {
     const limit = Math.min(Number(req.query.limit || 20), 100);
     const userId = process.env.JWT_ENABLED === "true" ? req.user?.uid : null;
     const builds = await listBuilds({ limit, userId });
+
     res.json({
       builds: builds.map((b) => {
         const { config, ...rest } = b;
-        return { ...rest, config: config ? { ...config, iconBase64: undefined } : null };
+        return {
+          ...rest,
+          config: config ? { ...config, iconBase64: undefined } : null,
+        };
       }),
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// DOWNLOAD APK (redirect to GitHub Releases)
+// ═══════════════════════════════════════════════════════════════
 async function downloadBuild(req, res, next) {
   try {
     const build = await getBuild(req.params.id);
     if (!build) return res.status(404).json({ error: "Build not found" });
+
     if (build.status !== "completed" || !build.apkUrl) {
-      return res.status(409).json({ error: "Build not completed", status: build.status });
+      return res.status(409).json({
+        error: "Build not completed",
+        status: build.status,
+      });
     }
+
     return res.redirect(302, build.apkUrl);
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// INTERNAL — worker only
+// Returns full config including iconBase64
+// ═══════════════════════════════════════════════════════════════
 async function getInternalConfig(req, res, next) {
   try {
     const secret = req.headers["x-internal-secret"];
@@ -98,9 +190,15 @@ async function getInternalConfig(req, res, next) {
       status: build.status,
       config: build.config,
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// INTERNAL — worker only
+// Returns the offline ZIP (assembled from chunks) or 404
+// ═══════════════════════════════════════════════════════════════
 async function getInternalZip(req, res, next) {
   try {
     const secret = req.headers["x-internal-secret"];
@@ -112,10 +210,60 @@ async function getInternalZip(req, res, next) {
     if (!zip) return res.status(404).json({ error: "No offline ZIP" });
 
     res.json(zip);
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// INTERNAL — worker only
+// Lists all custom modules for a build
+// ═══════════════════════════════════════════════════════════════
+async function getInternalModulesList(req, res, next) {
+  try {
+    const secret = req.headers["x-internal-secret"];
+    if (!secret || secret !== process.env.WEBHOOK_SECRET) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const modules = await listBuildModules(req.params.buildId);
+    res.json({ modules });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// INTERNAL — worker only
+// Returns a single module's base64 content (assembled from chunks)
+// ═══════════════════════════════════════════════════════════════
+async function getInternalModule(req, res, next) {
+  try {
+    const secret = req.headers["x-internal-secret"];
+    if (!secret || secret !== process.env.WEBHOOK_SECRET) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { buildId, moduleId } = req.params;
+    const mod = await getModuleChunks(buildId, moduleId);
+    if (!mod) return res.status(404).json({ error: "Module not found" });
+
+    res.json(mod);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// EXPORTS
+// ═══════════════════════════════════════════════════════════════
 module.exports = {
-  createBuild, getBuildById, listBuildsHandler, downloadBuild,
-  getInternalConfig, getInternalZip,
+  createBuild,
+  getBuildById,
+  listBuildsHandler,
+  downloadBuild,
+  getInternalConfig,
+  getInternalZip,
+  getInternalModulesList,
+  getInternalModule,
 };
