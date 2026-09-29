@@ -108,9 +108,13 @@ async function runScan() {
   const seenDeps = new Set();
 
   for (const mod of modules) {
+    console.log(`\n→ Scanning: ${mod.id}`);
     try {
       const data = await fetchModuleZip(mod.id);
-      if (!data) continue;
+      if (!data) {
+        console.warn(`  ✗ No data for ${mod.id}`);
+        continue;
+      }
 
       const tmpDir = path.join(process.cwd(), `.scan-${mod.id}`);
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -141,7 +145,8 @@ async function runScan() {
       // ═══ Collect deps.gradle ═══
       const depsFile = path.join(srcDir, "deps.gradle");
       if (fs.existsSync(depsFile)) {
-        const deps = fs.readFileSync(depsFile, "utf8")
+        const content = fs.readFileSync(depsFile, "utf8");
+        const deps = content
           .split("\n")
           .map(l => l.trim())
           .filter(l => l && !l.startsWith("//"));
@@ -152,18 +157,17 @@ async function runScan() {
           }
         }
         console.log(`  ✓ ${deps.length} deps collected`);
+        for (const d of deps) console.log(`     • ${d}`);
       } else {
-        console.log(`  ⚠ No deps.gradle in module`);
+        console.log(`  ⚠ No deps.gradle — module has no extra deps`);
       }
 
       // ═══ Collect manifest.xml ═══
       const manifestFile = path.join(srcDir, "manifest.xml");
       if (fs.existsSync(manifestFile)) {
-        let content = fs.readFileSync(manifestFile, "utf8");
-        // Use placeholder package name in scan; real one will replace later
-        // (scan doesn't have access to config yet, so keep placeholders)
+        const content = fs.readFileSync(manifestFile, "utf8");
 
-        // Root-level: <uses-permission /> and <uses-feature />
+        // Root-level: uses-permission and uses-feature
         const rootRegex = /<(uses-permission|uses-feature)\b[^>]*\/>/g;
         let m;
         while ((m = rootRegex.exec(content)) !== null) {
@@ -182,7 +186,7 @@ async function runScan() {
           flags.rootManifest.push(elem);
         }
 
-        // App-level: <activity>, <service>, <receiver>, <provider>
+        // App-level: activity, service, receiver, provider
         const appRegex = /<(activity|service|receiver|provider)\b[\s\S]*?<\/\1>|<(activity|service|receiver|provider)\b[^>]*\/>/g;
         while ((m = appRegex.exec(content)) !== null) {
           flags.appManifest.push(m[0].trim());
@@ -190,17 +194,18 @@ async function runScan() {
 
         console.log(`  ✓ Manifest: ${flags.rootManifest.length} root + ${flags.appManifest.length} app entries`);
       } else {
-        console.log(`  ⚠ No manifest.xml in module`);
+        console.log(`  ⚠ No manifest.xml — module has no manifest additions`);
       }
 
       fs.rmSync(tmpDir, { recursive: true, force: true });
     } catch (e) {
-      console.warn(`  ✗ Scan ${mod.id} failed:`, e.message);
+      console.error(`  ✗ Scan ${mod.id} FAILED:`, e.message);
+      console.error(`     ${e.stack}`);
     }
   }
 
   fs.writeFileSync("module-flags.json", JSON.stringify(flags, null, 2));
-  console.log(`✓ Wrote module-flags.json`);
+  console.log(`\n✓ Wrote module-flags.json`);
   console.log(`  overrideMainActivity: ${flags.overrideMainActivity}`);
   console.log(`  modules: ${flags.modules.length}`);
   console.log(`  deps: ${flags.allDeps.length}`);
@@ -353,6 +358,7 @@ async function runInstall() {
     }
   } catch (err) {
     console.error("Failed:", err.message);
+    console.error(err.stack);
     process.exit(1);
   }
 })();
